@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Selected-text actions
-The system SHALL offer vocabulary explanation, content interpretation, and custom question actions for selected text, labeled 名词解释 and 深度解读 for the two shortcuts. One-click translation SHALL NOT be offered in this phase. A shortcut SHALL immediately send its versioned template request using a frozen selection and append the question and answer to the active conversation; it SHALL NOT require a second send action.
+The system SHALL offer vocabulary explanation, content interpretation, and custom question actions for selected text, labeled 词汇解释 and 深度解读 for the two shortcuts. One-click translation SHALL NOT be offered in this phase. A shortcut SHALL immediately send its versioned template request using a frozen selection and append the question and answer to the active conversation; it SHALL NOT require a second send action.
 
 #### Scenario: Vocabulary explanation
 - **WHEN** the user selects a word or short phrase and chooses vocabulary explanation

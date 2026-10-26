@@ -17,6 +17,13 @@ The system SHALL capture selected PDF text with its page, normalized content, ch
 
 ## ADDED Requirements
 
+### Requirement: Cached vocabulary marker presentation
+The system SHALL mark cached vocabulary occurrences with a visible background without painting duplicate text over the rendered PDF. Markers SHALL preserve text selection and direct access to the cached explanation at supported reading scales.
+
+#### Scenario: Read and open a cached vocabulary occurrence
+- **WHEN** a cached vocabulary occurrence is displayed at normal or enlarged reading scale and clicked
+- **THEN** the original PDF text remains free of ghost glyphs, the vocabulary remains selectable, and its cached explanation opens without a model request
+
 ### Requirement: Desktop selection action popover
 The system SHALL show a small interactive vocabulary/deep-interpretation popover near a completed nonempty desktop text selection. It SHALL prefer space above the selection, fall below when necessary, stay within the visible reading region, and preserve the selection snapshot when clicked. Scrolling, reselecting, cancelling selection, and Escape SHALL dismiss stale popovers. Sidebar shortcuts SHALL remain available; a custom mobile selection popover is not required in this change.
 

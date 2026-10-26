@@ -17,7 +17,7 @@ MVP 的 OpenSpec 变更 `build-ai-reading-agent-mvp` 已归档，行为规范保
 - 桌面选区气泡名词解释／深度解读，完整引用快照、单行中间省略与原文页码跳转。
 - 统一安全 Markdown/GFM 展示、笔记阅读／编辑切换、可调侧栏与移动抽屉。
 
-体验优化变更 `refine-reading-workspace-experience` 已完成。手机真机验证留待后续迭代。
+体验优化变更 `refine-reading-workspace-experience` 已归档，行为规范已同步至 `openspec/specs/`。手机真机验证留待后续迭代。
 
 翻译快捷操作、TXT/EPUB 导入和多书向量检索暂不在一期范围。
 

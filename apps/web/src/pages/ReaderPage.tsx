@@ -1061,7 +1061,7 @@ export default function ReaderPage() {
           onCompleted={() => { void Promise.all([api<TermCacheItem[]>(`/api/projects/${projectId}/term-cache`), api<ContentCacheItem[]>(`/api/projects/${projectId}/content-cache?document_id=${documentId}`)]).then(([terms, contents]) => { setTermCaches(terms); setContentCaches(contents); }).catch((reason) => setError(reason.message)); }} />}
       </aside>
       {popover && selectionAnchor && <div className="selection-popover" role="toolbar" aria-label="选区快捷操作" style={{ left: popover.x, top: popover.y }} onPointerDown={(event) => event.preventDefault()}>
-        <button onClick={() => { setShortcut({ id: crypto.randomUUID(), action: 'vocabulary_explanation', quote: selectionAnchor }); setPopover(null); }}>名词解释</button>
+        <button onClick={() => { setShortcut({ id: crypto.randomUUID(), action: 'vocabulary_explanation', quote: selectionAnchor }); setPopover(null); }}>词汇解释</button>
         <button onClick={() => { setShortcut({ id: crypto.randomUUID(), action: 'content_interpretation', quote: selectionAnchor }); setPopover(null); }}>深度解读</button>
       </div>}
       {aiResult && <div className="cache-preview" role="dialog" aria-modal="true" aria-label="缓存解释"><header><strong>历史解释</strong><button className="icon-button" title="关闭解释" aria-label="关闭解释" onClick={() => setAiResult(null)}><X size={16} /></button></header>

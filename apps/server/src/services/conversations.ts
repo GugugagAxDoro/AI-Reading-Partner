@@ -116,7 +116,7 @@ export class ConversationService {
     const history = this.history(id, input);
     const route = input.action === 'custom_question' ? routeReadingIntent({ instruction: input.text, forceAgent: input.forceAgent }) : { kind: 'direct_action' };
     const prepared = this.prepare(projectId, conversation.document_id, input, history);
-    const pair = this.repository.enqueue(id, { ...input, text: input.text || (input.action === 'vocabulary_explanation' ? '名词解释' : '深度解读') });
+    const pair = this.repository.enqueue(id, { ...input, text: input.text || (input.action === 'vocabulary_explanation' ? '词汇解释' : '深度解读') });
     if (!pair.existing) {
       const promise = this.generate(projectId, conversation.document_id, pair.assistant, input, prepared, route.kind === 'agent_task', Boolean(conversation.web_enabled));
       this.work.add(promise);
