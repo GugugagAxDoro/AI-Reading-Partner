@@ -1,0 +1,24 @@
+[providers.main]
+type = "openai-compatible"
+base_url = "https://api.example.com/v1"
+api_key = "sk-your-key"
+
+[models.light]
+provider = "main"
+model = "DeepSeek"
+context_window = 128000
+supports_tool_calling = false
+
+[models.strong]
+provider = "main"
+model = "GLM"
+context_window = 256000
+supports_tool_calling = true
+
+[settings]
+quality_mode = "balanced"
+
+[searxng]
+base_url = "http://127.0.0.1:8080"
+timeout_ms = 20000
+max_results = 8

@@ -1,0 +1,38 @@
+{
+  "name": "ai-reading-partner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@12.0.1",
+  "workspaces": [
+    "apps/server",
+    "apps/web",
+    "packages/ai",
+    "packages/core",
+    "packages/db"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:web": "npm run dev --workspace apps/web",
+    "dev:server": "npm run dev --workspace apps/server",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "spec:validate": "openspec validate --all --strict --no-interactive",
+    "verify:pdf-samples": "node test-assets/manual-pdf/verify.mjs",
+    "smoke": "npm run test --workspace apps/server -- conversations workspace-migration --reporter=default --reporter=json --outputFile=../../docs/testing/artifacts/conversation-api/results.json && npm run test --workspace apps/web -- markdown --reporter=default --reporter=json --outputFile=../../docs/testing/artifacts/markdown-results.json && npx tsx apps/server/tests/workspace-smoke.ts && npx tsx apps/server/tests/workspace-report.ts",
+    "test:live-provider": "npx tsx apps/server/tests/check-live-provider.ts"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true,
+    "better-sqlite3@13.0.3": true
+  },
+  "dependencies": {
+    "@ltd/j-toml": "1.38.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.16.0"
+  }
+}

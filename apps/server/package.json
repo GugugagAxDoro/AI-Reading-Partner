@@ -1,0 +1,37 @@
+{
+  "name": "@ai-reading-partner/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "npm run build:markmap && tsc -p tsconfig.json",
+    "build:markmap": "esbuild --bundle --format=iife --global-name=markmap --outfile=public/markmap-bundle.js --minify --define:process.env.NODE_ENV='\"production\"' --loader:.ts=ts src/static/markmap-entry.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-reading-partner/ai": "0.1.0",
+    "@ai-reading-partner/core": "0.1.0",
+    "@ai-reading-partner/db": "0.1.0",
+    "@fastify/cors": "^11.0.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/static": "^10.1.6",
+    "@napi-rs/canvas": "^0.1.100",
+    "fastify": "^5.12.7",
+    "markmap-common": "^0.18.9",
+    "markmap-lib": "^0.18.12",
+    "markmap-view": "^0.18.12",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.7.284",
+    "pino": "^9.0.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
