@@ -113,3 +113,18 @@ The system SHALL preserve project-wide terminology and passage-scoped cache beha
 #### Scenario: Regenerate after template update
 - **WHEN** the user explicitly regenerates an older cached explanation
 - **THEN** the current template is used while existing conversation messages and original answer metadata remain intact
+
+### Requirement: Default web evidence for reading questions
+The system SHALL supplement uncached reading questions and selected-text actions with at most three search results by default when the conversation enables web access. Network evidence SHALL fit within the existing input budget, retain source URLs, and be distinguished from document content. Complete current questions and selections SHALL remain protected. Compatible cached explanations SHALL remain viewable without a new search. Failed searches SHALL NOT prevent local answers or populate reusable explanation caches with degraded results.
+
+#### Scenario: Combined reading answer
+- **WHEN** an uncached question has local context and available search results
+- **THEN** bounded local and web evidence are both available to the model and source references remain attached to the answer
+
+#### Scenario: Direct question search outage
+- **WHEN** search is unavailable during a normal reading question
+- **THEN** the model answers from the bounded local context and the displayed answer includes a clear network-unavailable notice
+
+#### Scenario: Disabled web
+- **WHEN** the conversation disables web access
+- **THEN** ordinary and shortcut questions make no external search request

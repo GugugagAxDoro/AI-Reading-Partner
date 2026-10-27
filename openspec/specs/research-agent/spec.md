@@ -22,19 +22,27 @@ The system SHALL execute agent tasks through an explicit tool set with a configu
 - **THEN** the UI shows a concise timeline entry and complete run details are retained in the agent run directory
 
 ### Requirement: Retrieval fallback order
-The system SHALL search the current document first, then project documents, then the configured web search when local evidence is insufficient or web search is explicitly requested.
+The system SHALL retrieve current-document context and configured web search evidence by default before research planning when web search is enabled. Insufficient current-document evidence SHALL permit project-document retrieval. Disabling web search for a conversation SHALL prevent both external search and web fetch.
 
 #### Scenario: Current-document evidence
 - **WHEN** the current document contains sufficient evidence
-- **THEN** the agent answers without searching the project or web
+- **THEN** the agent combines current-document evidence with the default web search results without requiring project search
 
 #### Scenario: Project fallback
 - **WHEN** current-document evidence is insufficient and project search is allowed
 - **THEN** the agent searches other documents in the project and cites cross-document sources
 
 #### Scenario: Web fallback
-- **WHEN** project evidence remains insufficient and web search is enabled
-- **THEN** the agent searches through the configured SearXNG provider and cites web sources
+- **WHEN** a research request starts with web search enabled
+- **THEN** the agent searches through the configured SearXNG provider before planning and combines available network evidence with local context, citing page numbers and URLs separately
+
+#### Scenario: Search unavailable
+- **WHEN** search fails due to connection refusal, timeout, HTTP failure, invalid JSON, or unavailable upstream engines
+- **THEN** the task continues using local evidence, explicitly reports that network information could not be verified, and does not repeatedly retry unavailable search during that run
+
+#### Scenario: User cancels during search
+- **WHEN** the user stops the task while a search is pending
+- **THEN** the upstream request is cancelled and the task stays cancelled rather than continuing through fallback
 
 ### Requirement: Web search privacy
 The system SHALL send only agent-generated queries and necessary request parameters to SearXNG, not whole-book content or user-selected passages.
@@ -133,7 +141,7 @@ The system SHALL retain references to permanently deleted books and mark them as
 - **THEN** compatible references and progress can be restored from the missing-source state
 
 ### Requirement: Unified research conversation
-The system SHALL expose reading questions and research through one conversation composer, attach research runs and their output to the initiating conversation message, and display an expandable tool timeline within that message. Existing current-book/project/web fallback order, per-conversation web-disable control, tool limits, source retention, and note-write confirmation requirements SHALL remain effective.
+The system SHALL expose reading questions and research through one conversation composer, attach research runs and their output to the initiating conversation message, and display an expandable tool timeline within that message. Default local-and-web evidence retrieval, per-conversation web-disable control, tool limits, source retention, and note-write confirmation requirements SHALL remain effective.
 
 #### Scenario: Research through the composer
 - **WHEN** a question is routed or explicitly submitted for research

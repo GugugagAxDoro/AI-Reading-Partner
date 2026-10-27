@@ -3,7 +3,7 @@ export type AiActionType =
   | 'content_interpretation'
   | 'custom_question';
 
-export const PROMPT_VERSION = 'reading-assistant-v2';
+export const PROMPT_VERSION = 'reading-assistant-v3';
 
 export interface PromptContext {
   selectedText: string;

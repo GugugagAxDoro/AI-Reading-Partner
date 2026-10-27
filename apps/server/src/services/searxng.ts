@@ -20,6 +20,15 @@ export class SearxngClient {
     return Boolean(this.providerConfig.current.searxng?.base_url);
   }
 
+  async searchWithFallback(projectId: string, query: string, options: { limit?: number; signal?: AbortSignal } = {}) {
+    try {
+      return { results: await this.search(projectId, query, options), warning: null };
+    } catch {
+      options.signal?.throwIfAborted();
+      return { results: [] as SearxngResult[], warning: '联网搜索暂不可用，已使用本地上下文继续回答；无法核实最新网络信息。' };
+    }
+  }
+
   async search(projectId: string, query: string, options: { limit?: number; signal?: AbortSignal } = {}): Promise<SearxngResult[]> {
     options.signal?.throwIfAborted();
     const config = this.providerConfig.current;
@@ -51,6 +60,11 @@ export class SearxngClient {
       if (!contentType.includes('json')) throw new Error('SearXNG JSON API is disabled');
       const payload = await response.json() as unknown;
       const results = parseSearxngResponse(payload, limit);
+      if (!results.length && typeof payload === 'object' && payload !== null
+        && Array.isArray((payload as { unresponsive_engines?: unknown }).unresponsive_engines)
+        && (payload as { unresponsive_engines: unknown[] }).unresponsive_engines.length) {
+        throw new Error('SearXNG engines are unavailable');
+      }
       this.cache?.saveWeb({
         projectId,
         url: 'search',
