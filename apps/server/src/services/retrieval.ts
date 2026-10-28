@@ -8,6 +8,9 @@ export interface RetrievedChunk {
   page_number: number;
   text: string;
   token_estimate: number;
+  metadata_json?: string;
+  char_start?: number | null;
+  char_end?: number | null;
   score: number;
 }
 
@@ -27,7 +30,7 @@ export class RetrievalService {
     const limit = Math.min(Math.max(1, options.limit ?? 5), 20);
     const rows = this.database
       .prepare(
-        `SELECT c.id, c.document_id, c.section_id, c.page_number, c.text, c.token_estimate,
+        `SELECT c.id, c.document_id, c.section_id, c.page_number, c.text, c.token_estimate, c.metadata_json, c.char_start, c.char_end,
                 bm25(chunks_fts) AS bm25_rank
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.chunk_id
@@ -59,7 +62,7 @@ export class RetrievalService {
     if (!matchQuery) return { current, other: [] };
     const rows = this.database
       .prepare(
-        `SELECT c.id, c.document_id, c.section_id, c.page_number, c.text, c.token_estimate,
+        `SELECT c.id, c.document_id, c.section_id, c.page_number, c.text, c.token_estimate, c.metadata_json, c.char_start, c.char_end,
                 bm25(chunks_fts) AS bm25_rank
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.chunk_id

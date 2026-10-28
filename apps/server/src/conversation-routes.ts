@@ -32,7 +32,7 @@ export function registerConversationRoutes(app: FastifyInstance, service: Conver
     const { projectId, conversationId } = request.params as Scope;
     service.scope(projectId, conversationId);
     const query = z.object({ before: z.coerce.number().int().positive().optional() }).parse(request.query);
-    const messages = service.repository.messages(conversationId, query.before);
+    const messages = service.repository.messages(conversationId, query.before).map(message => service.present(message));
     return { messages, nextCursor: messages.length === 50 ? messages[0]!.ordinal : null };
   });
   app.post(`${base}/messages`, (request, reply) => {

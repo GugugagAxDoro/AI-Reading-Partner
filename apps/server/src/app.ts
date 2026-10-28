@@ -23,6 +23,7 @@ import {
   classifyTextLayer,
   resolveDataRoot,
   ensureDataRoot,
+  summaryReferences,
 } from '@ai-reading-partner/core';
 import {
   CacheRepository,
@@ -51,6 +52,7 @@ import { routeReadingIntent } from './services/intent-router';
 import { TextExtractionService } from './services/text-extraction';
 import { ConversationService } from './services/conversations';
 import { registerConversationRoutes } from './conversation-routes';
+import { resolveSourcePositions } from './services/source-positions';
 
 const pdfjsDistDir = new URL('../../../node_modules/pdfjs-dist/build', import.meta.url).pathname;
 
@@ -364,7 +366,11 @@ export async function createApp(options: AppOptions = {}) {
   app.get('/api/documents/:documentId/summaries', (request) => {
     const { documentId } = request.params as { documentId: string };
     if (!documentRepository.get(documentId)) throw Object.assign(new Error('Document not found'), { statusCode: 404 });
-    return summaryRepository.listByDocument(documentId);
+    return summaryRepository.listByDocument(documentId).map(summary => {
+      const projectId = summary.project_id ?? (database.prepare('SELECT project_id FROM project_documents WHERE document_id=? LIMIT 1').get(documentId) as { project_id: string } | undefined)?.project_id;
+      if (!projectId || !summary.structure_json) return summary;
+      return { ...summary, structure_json: JSON.stringify({ ...JSON.parse(summary.structure_json), references: resolveSourcePositions(database, projectId, summaryReferences(summary.structure_json)) }) };
+    });
   });
 
   app.post('/api/projects/:projectId/documents/:documentId/summaries/book', async (request, reply) => {
@@ -410,7 +416,9 @@ export async function createApp(options: AppOptions = {}) {
   app.get('/api/projects/:projectId/summary', (request) => {
     const { projectId } = request.params as { projectId: string };
     if (!projectRepository.get(projectId)) throw Object.assign(new Error('Project not found'), { statusCode: 404 });
-    return summaryRepository.find('project', projectId, projectId) ?? null;
+    const summary = summaryRepository.find('project', projectId, projectId);
+    if (!summary?.structure_json) return summary ?? null;
+    return { ...summary, structure_json: JSON.stringify({ ...JSON.parse(summary.structure_json), references: resolveSourcePositions(database, projectId, summaryReferences(summary.structure_json)) }) };
   });
 
   app.get('/api/projects/:projectId/notes', (request) => {
@@ -532,14 +540,32 @@ export async function createApp(options: AppOptions = {}) {
   app.get('/api/projects/:projectId/term-cache', (request) => {
     const { projectId } = request.params as { projectId: string };
     if (!projectRepository.get(projectId)) throw Object.assign(new Error('Project not found'), { statusCode: 404 });
-    return cacheRepository.listTerms(projectId);
+    return cacheRepository.listTerms(projectId).map(item => ({ ...item, sources_json: JSON.stringify(resolveSourcePositions(database, projectId, JSON.parse(item.sources_json))) }));
   });
 
   app.get('/api/projects/:projectId/content-cache', (request) => {
     const { projectId } = request.params as { projectId: string };
     const query = request.query as { document_id?: string };
     if (!projectRepository.get(projectId)) throw Object.assign(new Error('Project not found'), { statusCode: 404 });
-    return cacheRepository.listContent(projectId, query.document_id ?? null);
+    return cacheRepository.listContent(projectId, query.document_id ?? null).map(item => ({ ...item, sources_json: JSON.stringify(resolveSourcePositions(database, projectId, JSON.parse(item.sources_json))) }));
+  });
+
+  app.get('/api/projects/:projectId/documents/:documentId/reading-records', (request) => {
+    const { projectId, documentId } = request.params as { projectId: string; documentId: string };
+    const document = documentRepository.getFromProject(projectId, documentId);
+    if (!document) throw Object.assign(new Error('Document not found'), { statusCode: 404 });
+    const rows = database.prepare(`SELECT a.id,a.action,a.markdown,a.metadata_json,u.quote_json FROM conversation_messages a
+      JOIN conversations c ON c.id=a.conversation_id JOIN conversation_messages u ON u.id=a.reply_to
+      WHERE c.project_id=? AND c.document_id=? AND a.role='assistant' AND a.status='completed' AND u.quote_json IS NOT NULL
+      ORDER BY a.ordinal DESC`).all(projectId, documentId) as Array<{ id: string; action: string; markdown: string; metadata_json: string; quote_json: string }>;
+    return rows.flatMap(row => {
+      const quote = JSON.parse(row.quote_json);
+      if (!quote.text || (quote.documentHash && quote.documentHash !== document.hash)) return [];
+      const metadata = JSON.parse(row.metadata_json);
+      if (metadata.quality?.valid === false || metadata.reusable === false) return [];
+      return [{ id: row.id, action: row.action, answer: row.markdown, quote,
+        sources: resolveSourcePositions(database, projectId, metadata.sources ?? []) }];
+    });
   });
 
   app.get('/api/projects/:projectId/web-cache', (request) => {

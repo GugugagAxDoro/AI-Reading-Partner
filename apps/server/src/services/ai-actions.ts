@@ -11,6 +11,7 @@ import {
   normalizeText,
   selectionHash,
   type ContextBuildResult,
+  chunkReferencePosition,
 } from '@ai-reading-partner/core';
 import {
   ModelClient,
@@ -19,8 +20,9 @@ import {
   type ProviderConfig,
 } from '@ai-reading-partner/ai';
 import type { Database } from '@ai-reading-partner/db';
-import { PROMPT_VERSION, buildPromptMessages, type AiActionType } from './prompts';
+import { PROMPT_VERSION, answerOutputTokens, buildPromptMessages, readingTaskProfile, type AiActionType } from './prompts';
 import { RetrievalService } from './retrieval';
+import { contextualSense } from './evidence';
 
 const actionSchemaValues: readonly AiActionType[] = [
   'vocabulary_explanation',
@@ -60,6 +62,10 @@ export interface SourceReference {
   id?: string;
   page: number;
   excerpt: string;
+  endPage?: number;
+  startOffset?: number;
+  endOffset?: number;
+  locationStatus?: 'verified' | 'unverified' | 'ambiguous';
 }
 
 export class AiActionService {
@@ -88,18 +94,21 @@ export class AiActionService {
       throw Object.assign(new Error('Unsupported AI action'), { statusCode: 400 });
     }
     const document = this.documents.get(documentId);
-    if (!document) throw Object.assign(new Error('Document not found'), { statusCode: 404 });
+    if (!document || !this.documents.listByProject(projectId).some((item) => item.id === documentId)) throw Object.assign(new Error('Document not found'), { statusCode: 404 });
 
     const normalized = normalizeText(input.normalizedText?.trim() || input.text);
     const hash = input.selectionHash?.trim() || selectionHash(normalized);
-    const instructionHash = createNormalizedHash(input.instruction ?? '');
     const pageNumber = Math.max(1, Math.floor(input.pageNumber));
     const language = input.language?.trim() || '简体中文';
+    const pageText = this.pages.list(documentId).find(item => item.page_number === pageNumber)?.text ?? '';
+    const sense = contextualSense(pageText, normalized);
+    const compatibility = `${PROMPT_VERSION}:legacy:${language}:${createNormalizedHash(input.instruction ?? '')}:${sense}`;
+    const instructionHash = createNormalizedHash(compatibility);
 
     if (input.action === 'vocabulary_explanation') {
       const normalizedTerm = normalizeText(input.text).toLowerCase();
-      const term = this.cache.findTerm(projectId, normalizedTerm);
-      if (term) {
+      const term = this.cache.findVariant(projectId, normalizedTerm, compatibility);
+      if (term?.prompt_version === PROMPT_VERSION) {
         return {
           answer: term.explanation,
           cached: true,
@@ -121,7 +130,7 @@ export class AiActionService {
         instructionHash,
         selectionHash: hash,
       });
-      if (content) {
+      if (content?.prompt_version === PROMPT_VERSION) {
         return {
           answer: content.answer,
           cached: true,
@@ -169,7 +178,7 @@ export class AiActionService {
       nearbyContext: context.text,
       language,
     });
-    const profile = input.action === 'custom_question' ? 'complex_qa' : 'simple_explanation';
+    const profile = readingTaskProfile(input.action, input.instruction ?? '');
     const routing = resolveRouting(providerFile, profile);
     const result = await client.complete({
       tier: routing.tier,
@@ -177,7 +186,7 @@ export class AiActionService {
         { role: 'system', content: messages.system },
         { role: 'user', content: messages.user },
       ],
-      maxTokens: 900,
+      maxTokens: answerOutputTokens(input.instruction ?? ''),
     });
 
     const sources = [
@@ -185,7 +194,8 @@ export class AiActionService {
       ...nearbySources,
     ];
     if (input.action === 'vocabulary_explanation') {
-      const term = this.cache.saveTerm({
+      const term = this.cache.saveVariant({
+        compatibility,
         projectId,
         normalizedTerm: normalizeText(input.text).toLowerCase(),
         displayTerm: input.text.trim(),
@@ -283,6 +293,7 @@ export class AiActionService {
     sources.push(...retrieved.map((chunk) => ({
       type: 'chunk' as const,
       id: chunk.id,
+      ...chunkReferencePosition(chunk),
       page: chunk.page_number,
       excerpt: chunk.text.slice(0, 160),
     })));

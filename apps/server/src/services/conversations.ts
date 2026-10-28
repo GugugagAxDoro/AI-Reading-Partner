@@ -4,7 +4,9 @@ import { estimateMessageTokens, ModelRequestError, RunBudget, resolveRouting, ty
 import { createNormalizedHash, normalizeText, serializeReferences, type SourceReference } from '@ai-reading-partner/core';
 import { CacheRepository, ConversationRepository, DocumentRepository, NoteRepository, PageRepository, type ConversationMessage, type Database } from '@ai-reading-partner/db';
 import { MindmapService } from './mindmap';
-import { PROMPT_VERSION, PROMPT_VERSIONS, buildPromptMessages } from './prompts';
+import { PROMPT_VERSION, PROMPT_VERSIONS, answerOutputTokens, buildPromptMessages, readingTaskProfile } from './prompts';
+import { chunkReferencePosition } from '@ai-reading-partner/core/references';
+import { resolveSourcePositions } from './source-positions';
 import { RetrievalService } from './retrieval';
 import { AgentService } from './agent';
 import { routeReadingIntent } from './intent-router';
@@ -136,31 +138,35 @@ export class ConversationService {
     let file;
     try { file = this.config.current; }
     catch { throw Object.assign(new Error('模型尚未配置或配置无效，请检查本地 providers.toml'), { statusCode: 400 }); }
-    const routing = resolveRouting(file, input.action === 'custom_question' ? 'complex_qa' : 'simple_explanation');
+    const routing = resolveRouting(file, readingTaskProfile(input.action, input.text));
     const document = this.documents.get(documentId)!;
     const section = this.db.prepare('SELECT id,title FROM sections WHERE document_id=? AND start_page<=? AND end_page>=? ORDER BY level DESC LIMIT 1')
       .get(documentId, input.quote?.page ?? 1, input.quote?.page ?? 1) as { id: string; title: string } | undefined;
     const prompt = buildPromptMessages(input.action, { title: document.title, page: input.quote?.page ?? 1,
       selectedText: input.quote?.text ?? '', instruction: input.text, sectionTitle: section?.title, language: '简体中文' });
     const protectedMessages: ChatMessage[] = [{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }];
-    const budget = Math.min(input.action === 'custom_question' ? 6000 : 3000, file.models[routing.tier].context_window - 1200 - 512);
+    const budget = Math.min(input.action === 'custom_question' ? 6000 : 5000, file.models[routing.tier].context_window - answerOutputTokens(input.text) - 512);
     if (messageTokens(protectedMessages) > budget) throw Object.assign(new Error('问题或原文超过上下文预算，请缩小范围后重试'), { statusCode: 413 });
     const localBudget = budget;
-    const chunks = this.retrieval.searchCurrent(documentId, (input.text || input.quote?.text || '').slice(0, 300), { limit: 3, currentPage: input.quote?.page });
+    const retrievalQuery = input.action === 'vocabulary_explanation' && input.quote ? input.quote.text : [input.quote?.text, input.text].filter(Boolean).join(' ');
+    const chunks = this.retrieval.searchCurrent(documentId, retrievalQuery.slice(0, 300), { limit: 3, currentPage: input.quote?.page });
     const page = input.quote ? this.pages.list(documentId).find((item) => item.page_number === input.quote?.page) : undefined;
-    const evidence = [...chunks.map((chunk) => ({ page: chunk.page_number, text: chunk.text, id: chunk.id })),
+    const evidence = [...chunks.map((chunk) => ({ ...chunkReferencePosition(chunk), page: chunk.page_number, text: chunk.text, id: chunk.id })),
       ...(page ? [{ page: page.page_number, text: page.text, id: `page:${page.page_number}` }] : [])];
     const summaries = this.db.prepare("SELECT markdown FROM summaries WHERE document_id=? AND (project_id=? OR project_id IS NULL) AND status='ready' AND (scope='book' OR section_id=?) LIMIT 2")
       .all(documentId, projectId, section?.id ?? null) as Array<{ markdown: string }>;
     let messages = [...protectedMessages];
     const sources: SourceReference[] = [];
-    if (input.quote) sources.push(makeSource({ source: 'document', title: document.title, page: input.quote.page, documentId, documentHash: document.hash,
+    if (input.quote) sources.push(makeSource({ source: 'document', title: document.title, page: input.quote.page, endPage: input.quote.endPage,
+      startOffset: input.quote.startOffset ?? undefined, endOffset: input.quote.endOffset ?? undefined, locationStatus: 'verified', documentId, documentHash: document.hash,
       anchor: `selection:${input.quote.startOffset ?? ''}:${createNormalizedHash(input.quote.text).slice(0, 16)}`, excerpt: input.quote.text.slice(0, 1200), evidenceType: 'passage' }));
     for (const item of evidence) {
       const text = input.quote ? item.text.replaceAll(input.quote.text, '[见选中文本]') : item.text;
       const candidate: ChatMessage = { role: 'user', content: `原文证据（第${item.page}页）：\n${text}` };
       if (messageTokens([...messages, candidate]) < localBudget) {
-        sources.push(makeSource({ source: 'document', title: document.title, page: item.page, documentId, excerpt: text.slice(0, 1800), anchor: item.id, evidenceType: 'passage' }));
+        sources.push(makeSource({ page: item.page, endPage: 'endPage' in item ? item.endPage : undefined,
+          locationStatus: 'locationStatus' in item ? item.locationStatus : 'verified',
+          source: 'document', title: document.title, documentId, excerpt: item.text.slice(0, 1800), anchor: item.id, evidenceType: 'passage' }));
       }
     }
     for (const summary of summaries) {
@@ -262,10 +268,11 @@ export class ConversationService {
         });
         metadata.quality = result.quality;
         metadata.usage = result.usage;
+        metadata.reusable = result.reusable;
       }
       budget.signal.throwIfAborted();
       if (!markdown.trim()) throw new Error('模型未返回文本');
-      if (cacheable && !metadata.cached && (metadata.quality as { valid?: boolean } | undefined)?.valid !== false && !(metadata.webSearch as { warning?: string } | undefined)?.warning) {
+      if (cacheable && !metadata.cached && metadata.reusable !== false && (metadata.quality as { valid?: boolean } | undefined)?.valid !== false && !(metadata.webSearch as { warning?: string } | undefined)?.warning) {
         const common = { projectId, sources: metadata.sources as unknown[], promptVersion: PROMPT_VERSION, modelId: prepared.routing.model, providerId: prepared.routing.providerId };
         if (input.action === 'vocabulary_explanation') this.cache.saveVariant({ ...common, compatibility, normalizedTerm: normalized.toLowerCase(), displayTerm: input.quote!.text, explanation: markdown });
         else this.cache.saveContent({ ...common, ...key, normalizedText: normalized, answer: markdown });
@@ -282,7 +289,16 @@ export class ConversationService {
   }
 
   snapshot(conversationId: string, messageId: string) {
-    return this.active.get(messageId)?.message ?? this.repository.message(conversationId, messageId);
+    const message = this.active.get(messageId)?.message ?? this.repository.message(conversationId, messageId);
+    return message ? this.present(message) : undefined;
+  }
+
+  present(message: ConversationMessage): ConversationMessage {
+    const conversation = this.db.prepare('SELECT project_id FROM conversations WHERE id=?').get(message.conversation_id) as { project_id: string } | undefined;
+    if (!conversation) return message;
+    const metadata = JSON.parse(message.metadata_json);
+    if (!Array.isArray(metadata.sources)) return message;
+    return { ...message, metadata_json: JSON.stringify({ ...metadata, sources: resolveSourcePositions(this.db, conversation.project_id, metadata.sources) }) };
   }
 
   subscribe(messageId: string, listener: (message: ConversationMessage) => void) {
@@ -305,6 +321,7 @@ export class ConversationService {
     if (!message || message.role !== 'assistant' || message.status !== 'completed') throw Object.assign(new Error('只能保存已完成的回答'), { statusCode: 400 });
     const notes = new NoteRepository(this.db, this.dataRoot);
     const metadata = JSON.parse(message.metadata_json);
+    metadata.sources = resolveSourcePositions(this.db, projectId, metadata.sources ?? []);
     const existing = metadata.noteId ? notes.get(metadata.noteId) : undefined;
     if (existing?.project_id === projectId) return existing;
     const references = (metadata.sources ?? []).map((source: { page?: number; documentId?: string; title?: string; url?: string; id?: string }) => {

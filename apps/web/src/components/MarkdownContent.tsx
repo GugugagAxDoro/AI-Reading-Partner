@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { BookOpen, Globe } from 'lucide-react';
-import { safeWebUrl, type SourceReference } from '@ai-reading-partner/core/references';
+import { referenceLabel, referencePageLabel, safeWebUrl, type SourceReference } from '@ai-reading-partner/core/references';
 
 export interface StableTarget { kind: 'term' | 'note' | 'doc' | 'section' | 'web'; id: string; label: string; page?: number }
 
@@ -95,9 +95,10 @@ export function MarkdownContent({ children, onNavigate, targetExists, onPage, so
           const isWeb = source.source === 'web';
           const target: StableTarget = { kind: 'doc', id: source.documentId ?? '', page: source.page, label: source.title };
           const url = safeWebUrl(source.url);
-          const exists = !source.missing && (isWeb ? Boolean(url) : targetExists?.(target) ?? false);
-          const description = `${isWeb ? '网页' : '书籍'}：${source.title}${isWeb && url ? ` · ${new URL(url).hostname}` : ` · 第 ${source.page ?? 1} 页`}${exists ? '' : '（来源不可用）'}`;
-          return <ReferenceBadge source={source} label={label} exists={exists} url={url} description={description} target={target} onNavigate={onNavigate} />;
+          const located = referencePageLabel(source) !== '原文';
+          const exists = !source.missing && (isWeb ? Boolean(url) : located && (targetExists?.(target) ?? false));
+          const description = `${isWeb ? '网页' : '书籍'}：${source.title}${isWeb ? url ? ` · ${new URL(url).hostname}` : '' : located ? ` · 第 ${source.page}${source.endPage && source.endPage > source.page! ? `–${source.endPage}` : ''} 页` : ' · 位置待核实'}${source.missing ? '（来源已失效）' : exists ? '' : '（来源不可用）'}`;
+          return <ReferenceBadge source={source} label={referenceLabel(source)} exists={exists} url={url} description={description} target={target} onNavigate={onNavigate} />;
         }
         const match = /^#stable-(term|note|doc|section|web)-(.*)$/u.exec(href ?? '');
         if (match) {

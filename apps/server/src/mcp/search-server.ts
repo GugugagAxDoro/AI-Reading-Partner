@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { SearxngClient } from '../services/searxng';
-import { WebFetchService } from '../services/web-fetch';
+import { WebFetchService, pageReadFailure } from '../services/web-fetch';
 
 const settings = z.object({
   base_url: z.string().url(), timeout_ms: z.number().int().positive().max(120000), max_results: z.number().int().min(1).max(50),
@@ -32,9 +32,9 @@ server.registerTool('read_web_page', {
   try {
     const page = await pages.fetchPage('', url, extra.signal);
     return { content: [{ type: 'text', text: JSON.stringify({ ...page, content: page.content.slice(0, 20000), fetchedAt: new Date().toISOString(), evidenceType: 'page' }) }] };
-  } catch {
+  } catch (error) {
     extra.signal.throwIfAborted();
-    return { isError: true, content: [{ type: 'text', text: 'page_unavailable' }] };
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'page_unavailable', ...pageReadFailure(error) }) }] };
   }
 });
 

@@ -44,10 +44,30 @@ export function searchQuery(question: string, selectedText = '', context = '') {
 export function relevantWebEvidence(query: string, source: { title: string; snippet: string }, context = '') {
   if (source.snippet.trim().length < 8) return false;
   const text = `${source.title} ${source.snippet}`.toLowerCase();
-  const terms = tokenForIndex(query).split(/\s+/u).filter((token) => token.length > 1 && !/^(?:联网|核验|最新|search|web|verify)$/iu.test(token));
-  if (terms.length && !terms.some((term) => text.includes(term.toLowerCase()))) return false;
-  if (/投资|收益|基准|量化|交易/u.test(context) && !/投资|收益|基准|量化|交易|风险|return|benchmark|risk|invest|portfolio|financ|trading/iu.test(text)) return false;
+  const terms = query.split(/\s+/u).flatMap(part => tokenForIndex(part).split(/\s+/u)).filter((token) => token.length > 1 && !/^(?:联网|核验|最新|search|web|verify)$/iu.test(token));
+  const specific = terms.filter(term => !/^(?:投资|收益|解释|解读|分析|相关|这个|是否|能否|判断|可以|需要|资料|信息|什么|为何|如何)$/u.test(term));
+  const concepts = specific.length ? specific : terms;
+  const named = concepts.filter(term => /^[a-z][a-z\d_-]*$/iu.test(term));
+  const explicitChineseName = (query.match(/\p{Script=Han}{4,}/gu) ?? []).some(phrase => text.includes(phrase));
+  if (named.length ? !named.some(term => text.includes(term.toLowerCase())) && !explicitChineseName : concepts.length && !concepts.some(term => text.includes(term.toLowerCase()))) return false;
+  const ambiguousNamed = named.length > 0 && !concepts.some(term => /\p{Script=Han}/u.test(term));
+  if (ambiguousNamed && /投资|收益|基准|量化|交易/u.test(context) && !/投资|收益|基准|量化|交易|金融|基金|风险(?:调整|模型|暴露)|\b(?:benchmark|invest(?:ment|ing|or|ors)?|portfolio|financ\w*|trading|fund|asset|beta|capm)\b|\b(?:excess|abnormal|risk[- ]adjusted|investment|portfolio|asset|fund|market)\s+returns?\b/iu.test(text)) return false;
   return true;
+}
+
+export function webTopicMatch(topic: string, source: { title: string; snippet: string }) {
+  if (!topic) return true;
+  const text = `${source.title} ${source.snippet}`.toLowerCase();
+  if (text.includes(topic.toLowerCase())) return true;
+  const terms = [...new Set(tokenForIndex(topic).split(/\s+/u).filter(term => term.length > 1))];
+  return terms.length > 1 && terms.filter(term => text.includes(term.toLowerCase())).length / terms.length >= 0.7;
+}
+
+export function webEvidenceScore(query: string, source: { title: string; snippet: string }) {
+  const terms = [...new Set(query.split(/\s+/u).flatMap(part => tokenForIndex(part).split(/\s+/u)).filter(term => term.length > 1))];
+  const title = source.title.toLowerCase();
+  const snippet = source.snippet.toLowerCase();
+  return terms.reduce((score, term) => score + (title.includes(term.toLowerCase()) ? 2 : 0) + (snippet.includes(term.toLowerCase()) ? 1 : 0), 0);
 }
 
 export function needsArtifact(question: string) {
@@ -80,7 +100,8 @@ function canonicalSourceUrl(value: string) {
 
 export function evidenceContext(sources: SourceReference[], registry = sources) {
   return sources.map((source) => ({ id: source.id, number: registry.findIndex((item) => item.id === source.id) + 1, type: source.source,
-    title: source.title, page: source.page, url: source.url, evidenceType: source.evidenceType,
+    title: source.title, page: source.locationStatus === 'unverified' || source.locationStatus === 'ambiguous' ? undefined : source.page,
+    endPage: source.endPage, locationStatus: source.locationStatus, url: source.url, evidenceType: source.evidenceType,
     excerpt: source.excerpt, fetchedAt: source.fetchedAt, claimIds: source.claimIds, conflictGroup: source.conflictGroup,
     duplicateGroup: source.duplicateGroup, coverage: source.anchor?.startsWith('selection:') ? 'selected_text_only' : 'excerpt_only',
     anchor: source.anchor }));

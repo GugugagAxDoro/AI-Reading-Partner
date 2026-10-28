@@ -5,6 +5,10 @@ export interface SourceReference {
   documentId?: string;
   documentHash?: string;
   page?: number;
+  endPage?: number;
+  startOffset?: number;
+  endOffset?: number;
+  locationStatus?: 'verified' | 'unverified' | 'ambiguous';
   anchor?: string;
   url?: string;
   excerpt?: string;
@@ -15,6 +19,25 @@ export interface SourceReference {
   claimIds?: string[];
   duplicateGroup?: string;
   conflictGroup?: string;
+}
+
+export function referencePageLabel(source: SourceReference): string {
+  if (!source.page || source.locationStatus !== 'verified') return '原文';
+  return `P${source.page}${source.endPage && source.endPage > source.page ? `–${source.endPage}` : ''}`;
+}
+
+export function referenceLabel(source: SourceReference): string {
+  if (source.source === 'document') return referencePageLabel(source);
+  return source.title.trim() || (safeWebUrl(source.url) ? new URL(source.url!).hostname : '网页');
+}
+
+export function chunkReferencePosition(chunk: { page_number: number; metadata_json?: string; char_start?: number | null; char_end?: number | null }): Pick<SourceReference, 'page' | 'endPage' | 'startOffset' | 'endOffset' | 'locationStatus'> {
+  let metadata: Record<string, unknown> = {};
+  try { metadata = JSON.parse(chunk.metadata_json ?? '{}'); } catch { /* Legacy metadata may be incomplete. */ }
+  const verified = metadata.position_version === 'page-spans-v2';
+  return { page: chunk.page_number, endPage: verified ? Number(metadata.end_page) || chunk.page_number : undefined,
+    startOffset: verified ? chunk.char_start ?? undefined : undefined, endOffset: verified ? chunk.char_end ?? undefined : undefined,
+    locationStatus: verified ? 'verified' : 'unverified' };
 }
 
 export function summaryReferences(structure: string | null | undefined): SourceReference[] {
@@ -47,6 +70,8 @@ export function serializeReferences(markdown: string, sources: SourceReference[]
     const title = source.title.replace(/[\[\]\r\n]/gu, ' ');
     const url = safeWebUrl(source.url);
     if (source.source === 'web') return `[^${label}]: ${title}${url ? ` <${url}>` : '（来源不可用）'}`;
-    return `[^${label}]: ${title}，第 ${source.page ?? 1} 页${source.missing ? '（来源已失效）' : '（在应用内定位）'} [[doc:${source.documentId ?? 'missing'}#page=${source.page ?? 1}|原文]]`;
+    const position = referencePageLabel(source);
+    const locator = position !== '原文' && source.documentId ? ` [[doc:${source.documentId}#page=${source.page}|原文]]` : '（位置待核实）';
+    return `[^${label}]: ${title}，${position}${source.missing ? '（来源已失效）' : ''}${locator}`;
   }).join('\n');
 }

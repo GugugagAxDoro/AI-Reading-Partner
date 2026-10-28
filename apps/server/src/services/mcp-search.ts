@@ -7,7 +7,7 @@ import { createNormalizedHash } from '@ai-reading-partner/core';
 import type { ProviderConfig } from '@ai-reading-partner/ai';
 import type { CacheRepository } from '@ai-reading-partner/db';
 import type { SearxngResult } from './searxng';
-import { validatePublicHttpUrl } from './web-fetch';
+import { PageReadError, pageFailureCodes, validatePublicHttpUrl } from './web-fetch';
 import { searchQuery } from './evidence';
 
 const searchResultSchema = z.object({ results: z.array(z.object({
@@ -114,7 +114,7 @@ export class McpSearchService {
 
   async fetchPage(projectId: string, url: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
-    try { validatePublicHttpUrl(url); } catch { throw new Error('Page unavailable: blocked destination'); }
+    try { validatePublicHttpUrl(url); } catch { throw new PageReadError('blocked_destination'); }
     const cached = this.cache?.findWeb(projectId, url, 'fetch');
     if (cached?.content && cached.status === 'ready' && Date.now() - Date.parse(cached.fetched_at) < 86400000) {
       return { url, finalUrl: url, title: cached.title, content: cached.content, fetchedAt: cached.fetched_at, evidenceType: 'page' as const, cached: true };
@@ -122,7 +122,14 @@ export class McpSearchService {
     const client = await this.connect(signal);
     const reply = await client.callTool({ name: 'read_web_page', arguments: { url } }, undefined,
       { signal, timeout: this.config.current.mcp?.search?.read_timeout_ms ?? 20000 });
-    if (reply.isError) throw new Error('Page unavailable');
+    if (reply.isError) {
+      let failure: { code: typeof pageFailureCodes[number]; status?: number } = { code: 'unavailable' };
+      try {
+        const parsed = z.object({ code: z.enum(pageFailureCodes), status: z.number().int().min(400).max(599).optional() }).safeParse(JSON.parse(resultText(reply.content)));
+        if (parsed.success) failure = parsed.data;
+      } catch { }
+      throw new PageReadError(failure.code, failure.status);
+    }
     const page = pageSchema.parse(JSON.parse(resultText(reply.content)));
     this.cache?.saveWeb({ projectId, url, queryHash: 'fetch', title: page.title, content: page.content,
       sourceMetadata: { transport: 'mcp-stdio', final_url: page.finalUrl, fetchedAt: page.fetchedAt }, retentionDays: 180 });

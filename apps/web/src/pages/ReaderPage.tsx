@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import * as pdfjsLib from 'pdfjs-dist';
 import { TextLayer } from 'pdfjs-dist';
 import 'pdfjs-dist/web/pdf_viewer.css';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { ArrowLeft, ArrowRight, Bookmark, Menu, MessageSquare, PanelLeftClose, PanelRightClose, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bookmark, Eye, Menu, MessageSquare, PanelLeftClose, PanelRightClose, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { alignTextLayerFonts } from '../lib/pdf-text-font';
+import { decorateReadingRanges, type ReadingDecoration } from '../lib/reading-decorations';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { ConversationPanel, type Shortcut } from '../components/ConversationPanel';
 import { serializeReferences, summaryReferences, type SourceReference } from '@ai-reading-partner/core/references';
@@ -101,6 +103,8 @@ interface ContentCacheItem {
   sources_json?: string;
 }
 
+interface ReadingRecord { id: string; action: string; answer: string; quote: QuoteSnapshot; sources: SourceReference[] }
+
 interface StableLinkToken {
   kind: 'term' | 'note' | 'doc' | 'section' | 'web';
   id: string;
@@ -131,7 +135,7 @@ function locateSelection(haystack: string, needle: string): { start: number; end
   const normalizedHaystack = collapseWhitespace(haystack);
   const normalizedNeedle = collapseWhitespace(needle);
   const start = normalizedHaystack.indexOf(normalizedNeedle);
-  if (start < 0) return null;
+  if (start < 0 || normalizedHaystack.indexOf(normalizedNeedle, start + 1) >= 0) return null;
   return { start, end: start + normalizedNeedle.length };
 }
 
@@ -149,8 +153,8 @@ async function buildSelectionAnchor(
     normalizedText,
     hash: await hashText(selectedText),
     quote: normalizedText,
-    prefix: collapseWhitespace(pageText).slice(Math.max(0, quoteStart - 80), quoteStart),
-    suffix: collapseWhitespace(pageText).slice((location?.end ?? normalizedText.length), (location?.end ?? normalizedText.length) + 80),
+    prefix: location ? collapseWhitespace(pageText).slice(Math.max(0, quoteStart - 80), quoteStart) : '',
+    suffix: location ? collapseWhitespace(pageText).slice(location.end, location.end + 80) : '',
     startOffset: location?.start,
     endOffset: location?.end,
   };
@@ -167,7 +171,6 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export default function ReaderPage() {
   const { projectId, documentId } = useParams();
-  const navigate = useNavigate();
   const [references, setReferences] = useState<Array<{ id: string; kind: string; documentId: string; page: number }>>([]);
   useEffect(() => {
     let cancelled = false;
@@ -184,6 +187,13 @@ export default function ReaderPage() {
   const renderedScalesRef = useRef(new Map<number, number>());
   const pageTextsRef = useRef(new Map<number, string>());
   const termCachesRef = useRef<TermCacheItem[]>([]);
+  const contentCachesRef = useRef<ContentCacheItem[]>([]);
+  const readingRecordsRef = useRef<ReadingRecord[]>([]);
+  const decorationsRef = useRef(new Map<number, () => void>());
+  const textFontsRef = useRef(new Map<number, FontFace[]>());
+  const desiredWidthsRef = useRef(new Map<number, number>());
+  const [showMarkers, setShowMarkers] = useState(true);
+  const showMarkersRef = useRef(true);
   const initialProgressRef = useRef<{ page: number; scrollOffset: number } | null>(null);
   const restoredRef = useRef(false);
   const pendingRenderRef = useRef(new Set<number>());
@@ -265,6 +275,7 @@ export default function ReaderPage() {
   const [noteMarkdown, setNoteMarkdown] = useState('');
   const [termCaches, setTermCaches] = useState<TermCacheItem[]>([]);
   const [contentCaches, setContentCaches] = useState<ContentCacheItem[]>([]);
+  const [readingRecords, setReadingRecords] = useState<ReadingRecord[]>([]);
   const [lowTextPages, setLowTextPages] = useState<Set<number>>(new Set());
   const [providerStatus, setProviderStatus] = useState<ProviderStatusItem | null>(null);
   const [agentMindmapUrl, setAgentMindmapUrl] = useState<string | null>(null);
@@ -357,14 +368,16 @@ export default function ReaderPage() {
     let cancelled = false;
     void (async () => {
       try {
-        const [termList, contentList, metrics] = await Promise.all([
+        const [termList, contentList, metrics, records] = await Promise.all([
           api<TermCacheItem[]>(`/api/projects/${projectId}/term-cache`),
           api<ContentCacheItem[]>(`/api/projects/${projectId}/content-cache?document_id=${documentId}`),
           api<PageMetrics[]>(`/api/documents/${documentId}/page-metrics`),
+          api<ReadingRecord[]>(`/api/projects/${projectId}/documents/${documentId}/reading-records`),
         ]);
         if (cancelled) return;
         setTermCaches(termList);
         setContentCaches(contentList);
+        setReadingRecords(records);
         setLowTextPages(new Set(metrics.filter((item) => !item.has_text || item.char_count < 40).map((item) => item.page_number)));
       } catch {
         // Cache and diagnostics are enhancements; do not block the reader if they are unavailable.
@@ -380,7 +393,7 @@ export default function ReaderPage() {
     let cancelled = false;
     void (async () => {
       try {
-        const pdf = await pdfjsLib.getDocument({ url: `/api/documents/${documentId}/reader.pdf` }).promise;
+        const pdf = await pdfjsLib.getDocument({ url: `/api/documents/${documentId}/reader.pdf`, fontExtraProperties: true }).promise;
         if (cancelled) {
           void pdf.destroy();
           return;
@@ -413,6 +426,11 @@ export default function ReaderPage() {
       pageRenderTasksRef.current.clear();
       renderedScalesRef.current.clear();
       pageTextsRef.current.clear();
+      decorationsRef.current.forEach(cleanup => cleanup());
+      decorationsRef.current.clear();
+      textFontsRef.current.forEach(faces => faces.forEach(face => document.fonts.delete(face)));
+      textFontsRef.current.clear();
+      desiredWidthsRef.current.clear();
       pageRefs.current.clear();
       pendingRenderRef.current.clear();
       if (progressTimerRef.current) window.clearTimeout(progressTimerRef.current);
@@ -434,38 +452,42 @@ export default function ReaderPage() {
   const markTermCache = useCallback((pageNumber: number) => {
     const textLayer = textLayerRefs.current.get(pageNumber);
     if (!textLayer) return;
-    for (const term of termCachesRef.current) {
-      const normalizedTerm = collapseWhitespace(term.display_term);
-      if (!normalizedTerm || normalizedTerm.length > 100) continue;
-      const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT);
-      const replacements: Array<{ node: Text; index: number }> = [];
-      while (walker.nextNode()) {
-        const node = walker.currentNode as Text;
-        if (node.parentElement?.closest('.term-cached')) continue;
-        const index = node.data.toLowerCase().indexOf(normalizedTerm.toLowerCase());
-        if (index >= 0) replacements.push({ node, index });
-      }
-      for (const replacement of replacements) {
-        const { node, index } = replacement;
-        const marker = document.createElement('mark');
-        marker.className = 'term-cached';
-        marker.title = '项目缓存词汇，点击查看解释';
-        marker.textContent = node.data.slice(index, index + normalizedTerm.length);
-        marker.addEventListener('click', (event) => {
-          event.stopPropagation();
-          openTermPreview(term);
-        });
-        const after = node.splitText(index + normalizedTerm.length);
-        node.parentElement?.insertBefore(marker, after);
-        node.data = node.data.slice(0, index);
-      }
-    }
-  }, [openTermPreview]);
+    decorationsRef.current.get(pageNumber)?.();
+    if (!showMarkersRef.current) return;
+    const terms = termCachesRef.current;
+    const contents = contentCachesRef.current.filter(item => item.page_number === pageNumber);
+    const history = readingRecordsRef.current.filter(item => item.action !== 'vocabulary_explanation' && item.quote.page <= pageNumber && (item.quote.endPage ?? item.quote.page) >= pageNumber);
+    const historyRecords = history.flatMap(item => {
+      const fragment = item.quote.fragments?.find(part => part.page === pageNumber)?.text;
+      const text = fragment ?? (item.quote.page === (item.quote.endPage ?? item.quote.page) ? item.quote.text : '');
+      return text ? [{ id: item.id, text, prefix: item.quote.page === pageNumber ? item.quote.prefix : undefined,
+        suffix: (item.quote.endPage ?? item.quote.page) === pageNumber ? item.quote.suffix : undefined,
+        kind: item.action === 'content_interpretation' ? 'interpretation' as const : 'question' as const }] : [];
+    });
+    const records: ReadingDecoration[] = [...terms.map(term => ({ id: term.id, text: term.display_term, kind: 'vocabulary' as const })),
+      ...contents.filter(item => !history.some(record => record.action === item.action && record.answer === item.answer)).map(item => ({ id: item.id, text: item.normalized_text, kind: item.action === 'content_interpretation' ? 'interpretation' as const : 'question' as const })), ...historyRecords];
+    decorationsRef.current.set(pageNumber, decorateReadingRanges(textLayer, records, ids => {
+      const choices = ids.flatMap(id => {
+        const term = terms.find(item => item.id === id);
+        if (term) return [term];
+        const record = history.find(item => item.id === id);
+        if (record) return [{ id: record.id, display_term: `${record.action === 'content_interpretation' ? '深度解读' : '自定义问答'} · ${record.quote.text}`, explanation: record.answer, sources_json: JSON.stringify(record.sources) }];
+        const content = contents.find(item => item.id === id);
+        return content ? [{ id: content.id, display_term: content.normalized_text, explanation: content.answer, sources_json: content.sources_json }] : [];
+      });
+      if (!choices.length) return;
+      setTermChoices(choices); setSelectionAnchor(null);
+      setAiResult({ answer: choices[0]!.explanation, sources: JSON.parse(choices[0]!.sources_json ?? '[]'), cached: true, promptVersion: '', modelId: null, providerId: null });
+    }));
+  }, []);
 
   useEffect(() => {
     termCachesRef.current = termCaches;
+    contentCachesRef.current = contentCaches;
+    readingRecordsRef.current = readingRecords;
+    showMarkersRef.current = showMarkers;
     for (const pageNumber of renderedPages) markTermCache(pageNumber);
-  }, [markTermCache, renderedPages, termCaches]);
+  }, [markTermCache, renderedPages, termCaches, contentCaches, readingRecords, showMarkers]);
 
   const renderPage = useCallback(async (pageNumber: number) => {
     const pdf = pdfRef.current;
@@ -474,33 +496,45 @@ export default function ReaderPage() {
     if (!pdf || !canvas || !textLayerContainer) return;
     if (pageNumber < 1 || pageNumber > pdf.numPages) return;
     const targetWidth = Math.min(Math.max(stageWidth - 40, 1), 880) * scale / 1.2;
+    desiredWidthsRef.current.set(pageNumber, targetWidth);
     if (renderedScalesRef.current.get(pageNumber) === targetWidth) return;
     if (pendingRenderRef.current.has(pageNumber)) return;
 
     pendingRenderRef.current.add(pageNumber);
+    let attemptedWidth = targetWidth;
     pageRenderTasksRef.current.get(pageNumber)?.cancel();
     try {
       const page = await pdf.getPage(pageNumber);
+      if (pdfRef.current !== pdf) return;
       const unscaledViewport = page.getViewport({ scale: 1 });
       const geometry = { width: unscaledViewport.width, height: unscaledViewport.height };
       setPageSizes((current) => (current[pageNumber] ? current : { ...current, [pageNumber]: geometry }));
-      const viewport = page.getViewport({ scale: targetWidth / geometry.width });
+      const effectiveWidth = desiredWidthsRef.current.get(pageNumber) ?? targetWidth;
+      attemptedWidth = effectiveWidth;
+      const viewport = page.getViewport({ scale: effectiveWidth / geometry.width });
       textLayerContainer.style.setProperty('--total-scale-factor', String(viewport.scale));
       textLayerContainer.style.setProperty('--scale-round-x', '1px');
       textLayerContainer.style.setProperty('--scale-round-y', '1px');
       canvas.width = Math.floor(viewport.width * window.devicePixelRatio);
       canvas.height = Math.floor(viewport.height * window.devicePixelRatio);
-      canvas.style.width = '100%';
-      canvas.style.height = 'auto';
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
       const context = canvas.getContext('2d');
       if (!context) return;
-      context.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+      decorationsRef.current.get(pageNumber)?.();
       textLayerContainer.replaceChildren();
-      const renderTask = page.render({ canvas, canvasContext: context, viewport });
+      const renderTask = page.render({ canvas, canvasContext: context, viewport, transform: [window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0] });
       pageRenderTasksRef.current.set(pageNumber, renderTask);
       renderTaskRef.current = renderTask;
       await renderTask.promise;
+      if (pdfRef.current !== pdf) return;
       const textContent = await page.getTextContent();
+      for (const face of textFontsRef.current.get(pageNumber) ?? []) document.fonts.delete(face);
+      const faces = await alignTextLayerFonts(page, textContent);
+      if (pdfRef.current !== pdf || desiredWidthsRef.current.get(pageNumber) !== effectiveWidth) {
+        faces.forEach(face => document.fonts.delete(face)); return;
+      }
+      textFontsRef.current.set(pageNumber, faces);
       const pageText = textContent.items.map((item) => ('str' in item ? item.str : '')).join(' ');
       pageTextsRef.current.set(pageNumber, pageText);
       const textLayer = new TextLayer({
@@ -509,7 +543,7 @@ export default function ReaderPage() {
         viewport,
       });
       await textLayer.render();
-      renderedScalesRef.current.set(pageNumber, targetWidth);
+      renderedScalesRef.current.set(pageNumber, effectiveWidth);
       setRenderedPages((current) => new Set(current).add(pageNumber));
       markTermCache(pageNumber);
     } catch (renderError) {
@@ -518,6 +552,7 @@ export default function ReaderPage() {
       }
     } finally {
       pendingRenderRef.current.delete(pageNumber);
+      if (pdfRef.current === pdf && desiredWidthsRef.current.get(pageNumber) !== attemptedWidth) setRenderedPages(current => new Set(current));
     }
   }, [markTermCache, scale, stageWidth]);
 
@@ -550,7 +585,7 @@ export default function ReaderPage() {
     }
     if (visiblePages.size === 0 && currentPage >= 1 && currentPage <= pages.length) visiblePages.add(currentPage);
     void Promise.all(Array.from(visiblePages, (pageNumber) => renderPage(pageNumber)));
-  }, [currentPage, pages, renderPage]);
+  }, [currentPage, pages, renderPage, renderedPages]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -607,6 +642,16 @@ export default function ReaderPage() {
       const revision = ++selectionRevision.current;
       const endPage = Number(range?.endContainer.parentElement?.closest('[data-page-number]')?.getAttribute('data-page-number') ?? pageNumber);
       const fragments: Array<{ page: number; text: string }> = [];
+      const firstLayer = textLayerRefs.current.get(pageNumber);
+      const lastLayer = textLayerRefs.current.get(endPage);
+      let prefix: string | undefined;
+      let suffix: string | undefined;
+      if (range && firstLayer?.contains(range.startContainer) && lastLayer?.contains(range.endContainer)) {
+        const before = document.createRange(); before.selectNodeContents(firstLayer); before.setEnd(range.startContainer, range.startOffset);
+        const after = document.createRange(); after.selectNodeContents(lastLayer); after.setStart(range.endContainer, range.endOffset);
+        prefix = collapseWhitespace(before.toString()).slice(-80);
+        suffix = collapseWhitespace(after.toString()).slice(0, 80);
+      }
       if (range) for (const [page, layer] of textLayerRefs.current) {
         if (page >= pageNumber && page <= endPage) {
           const fragment = range.cloneRange();
@@ -615,9 +660,11 @@ export default function ReaderPage() {
           fragments.push({ page, text: fragment.toString() });
         }
       }
-      void buildSelectionAnchor(pageNumber, text, pageText).then((anchor) => {
+      const selectedText = fragments.length ? fragments.sort((left, right) => left.page - right.page).map(fragment => fragment.text).join('\n') : text;
+      setSelection(selectedText);
+      void buildSelectionAnchor(pageNumber, selectedText, pageText).then((anchor) => {
         if (revision !== selectionRevision.current) return;
-        const snapshot = { ...anchor, documentHash: documentDetail?.hash, endPage, fragments };
+        const snapshot = { ...anchor, ...(prefix !== undefined ? { prefix, suffix } : {}), documentHash: documentDetail?.hash, endPage, fragments };
         setSelectionAnchor(snapshot); setAttachedQuote(snapshot);
       });
       const bounds = scrollContainerRef.current?.getBoundingClientRect();
@@ -788,11 +835,11 @@ export default function ReaderPage() {
       if (section) goToPage(section.start_page);
       else {
         const target = references.find((item) => item.id === token.id && item.kind === 'section');
-        if (target) navigate(`/read/${projectId}/${target.documentId}#page=${target.page}`);
+        if (target) window.open(`/read/${projectId}/${target.documentId}#page=${target.page}`, '_blank', 'noopener,noreferrer');
       }
       return;
     }
-    if (token.kind === 'doc') { if (token.id === documentId) goToPage(token.page ?? 1); else navigate(`/read/${projectId}/${token.id}#page=${token.page ?? 1}`); return; }
+    if (token.kind === 'doc') { if (token.id === documentId) goToPage(token.page ?? 1); else window.open(`/read/${projectId}/${token.id}#page=${token.page ?? 1}`, '_blank', 'noopener,noreferrer'); return; }
     if (token.kind === 'web') {
       window.open(token.id, '_blank', 'noopener,noreferrer');
     }
@@ -966,6 +1013,7 @@ export default function ReaderPage() {
             </button>
           </div>
           <div className="reader-actions">
+            <button className="icon-button" title="显示历史标记" aria-label="显示历史标记" aria-pressed={showMarkers} onClick={() => setShowMarkers(value => !value)}><Eye size={16} /></button>
             <button className="icon-button" title="缩小" aria-label="缩小" type="button" onClick={() => setScale((value) => Math.max(0.6, value - 0.1))}><ZoomOut size={16} /></button>
             <button className="icon-button" title="放大" aria-label="放大" type="button" onClick={() => setScale((value) => Math.min(2.5, value + 0.1))}><ZoomIn size={16} /></button>
             <button className="icon-button" title="保存进度" aria-label="保存进度" type="button" onClick={() => void saveProgress()}><Bookmark size={16} /></button>
@@ -1048,7 +1096,7 @@ export default function ReaderPage() {
         {projectId && documentId && <ConversationPanel key={`${projectId}:${documentId}`} projectId={projectId} documentId={documentId} quote={attachedQuote} shortcut={shortcut} onPage={goToPage}
           onNavigate={followStableLink} targetExists={stableLinkTargetExists}
           onSaved={() => { void api<NoteItem[]>(`/api/projects/${projectId}/notes`).then(setNotes).catch((reason) => setError(reason.message)); }}
-          onCompleted={() => { void Promise.all([api<TermCacheItem[]>(`/api/projects/${projectId}/term-cache`), api<ContentCacheItem[]>(`/api/projects/${projectId}/content-cache?document_id=${documentId}`)]).then(([terms, contents]) => { setTermCaches(terms); setContentCaches(contents); }).catch((reason) => setError(reason.message)); }} />}
+          onCompleted={() => { void Promise.all([api<TermCacheItem[]>(`/api/projects/${projectId}/term-cache`), api<ContentCacheItem[]>(`/api/projects/${projectId}/content-cache?document_id=${documentId}`), api<ReadingRecord[]>(`/api/projects/${projectId}/documents/${documentId}/reading-records`)]).then(([terms, contents, records]) => { setTermCaches(terms); setContentCaches(contents); setReadingRecords(records); }).catch((reason) => setError(reason.message)); }} />}
       </aside>
       {popover && selectionAnchor && <div className="selection-popover" role="toolbar" aria-label="选区快捷操作" style={{ left: popover.x, top: popover.y }} onPointerDown={(event) => event.preventDefault()}>
         <button onClick={() => { setShortcut({ id: crypto.randomUUID(), action: 'vocabulary_explanation', quote: selectionAnchor }); setPopover(null); }}>词汇解释</button>
@@ -1056,7 +1104,7 @@ export default function ReaderPage() {
       </div>}
       {aiResult && <div className="cache-preview" role="dialog" aria-modal="true" aria-label="缓存解释"><header><strong>历史解释</strong><button className="icon-button" title="关闭解释" aria-label="关闭解释" onClick={() => setAiResult(null)}><X size={16} /></button></header>
         {termChoices.length > 1 && <select aria-label="词汇历史解释" value={termChoices.find((item) => item.explanation === aiResult.answer)?.id ?? ''}
-          onChange={(event) => { const term = termChoices.find((item) => item.id === event.target.value); if (term) openTermPreview(term); }}>
+          onChange={(event) => { const term = termChoices.find((item) => item.id === event.target.value); if (term) setAiResult({ ...aiResult, answer: term.explanation, sources: JSON.parse(term.sources_json ?? '[]') }); }}>
           {termChoices.map((term) => <option key={term.id} value={term.id}>{(JSON.parse(term.sources_json ?? '[]') as SourceReference[])[0]?.title ?? term.display_term} · {term.explanation.slice(0, 70)}</option>)}
         </select>}
         <MarkdownContent sources={aiResult.sources} onNavigate={followStableLink} targetExists={stableLinkTargetExists} onPage={goToPage}>{aiResult.answer}</MarkdownContent>

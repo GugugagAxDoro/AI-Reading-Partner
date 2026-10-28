@@ -1,4 +1,4 @@
-import { estimateTokens, summaryReferences, type SourceReference } from '@ai-reading-partner/core';
+import { chunkReferencePosition, estimateTokens, summaryReferences, type SourceReference } from '@ai-reading-partner/core';
 import {
   ChunkRepository,
   DocumentRepository,
@@ -81,7 +81,7 @@ export class SummaryService {
     });
     try {
       const chunks = this.chunks.list(documentId);
-      const references = chunks.map((chunk) => makeSource({ source: 'document', documentId, title: document.title, page: chunk.page_number, anchor: chunk.id, evidenceType: 'passage' }));
+      const references = chunks.map((chunk) => makeSource({ source: 'document', documentId, title: document.title, ...chunkReferencePosition(chunk), anchor: chunk.id, evidenceType: 'passage' }));
       const evidence = await this.mapReduceEvidence(document.title, chunks.map((chunk, index) => ({
         text: `[[ref:${references[index]!.id}]]\n${chunk.text}`,
         sectionId: chunk.section_id,
@@ -125,7 +125,7 @@ export class SummaryService {
     });
     try {
       const chunks = this.chunks.listBySection(sectionId);
-      const references = chunks.map((chunk) => makeSource({ source: 'document', documentId, title: document.title, page: chunk.page_number, anchor: chunk.id, evidenceType: 'passage' }));
+      const references = chunks.map((chunk) => makeSource({ source: 'document', documentId, title: document.title, ...chunkReferencePosition(chunk), anchor: chunk.id, evidenceType: 'passage' }));
       const evidence = await this.mapReduceEvidence(document.title, chunks.map((chunk, index) => ({
         text: `[[ref:${references[index]!.id}]]\n${chunk.text}`,
         sectionId,

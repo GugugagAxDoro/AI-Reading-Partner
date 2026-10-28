@@ -26,7 +26,8 @@ import { CacheRepository } from '@ai-reading-partner/db';
 import { RetrievalService } from './retrieval';
 import { McpSearchService } from './mcp-search';
 import { MindmapService } from './mindmap';
-import { answerContract, basePrompt, EVIDENCE_POLICY, PROMPT_VERSION } from './prompts';
+import { answerContract, answerOutputTokens, basePrompt, EVIDENCE_POLICY, PROMPT_VERSION } from './prompts';
+import { chunkReferencePosition } from '@ai-reading-partner/core/references';
 import { boundedObservation, requiresExternal, needsArtifact, evidenceContext, evidenceLedger, makeSource, relevantWebEvidence, resolveReferenceAliases, retrievalFingerprint, searchQuery, validateAnswer, readingRequestSchema, type ReadingRequest } from './evidence';
 
 export interface AgentRunInput {
@@ -418,15 +419,16 @@ export class AgentService {
           this.runs.addStep({ runId, type: 'search_web', title: webWarning ? '联网核验不可用' : '核验外部证据', payload: { observation } });
           messages.push({ role: 'user', content: `联网不可信参考：${JSON.stringify(boundedObservation(observation))}` });
         }
+        let nativeToolSupport = client.supportsNativeTools(routing.tier);
         while (rounds < run.max_rounds && !result) {
           options.signal?.throwIfAborted();
           rounds += 1;
-          if (!budget.canExpand(3000)) break;
+          if (!budget.canExpand(3000, answerOutputTokens(run.task))) break;
           const permittedNames = Object.keys(TOOL_SCHEMAS).filter((name) =>
             (allowWeb || !['search_web', 'fetch_web_page'].includes(name))
             && (needsArtifact(run.task) || !['create_note', 'append_note', 'rewrite_note', 'delete_note', 'generate_mindmap', 'save_cache'].includes(name)));
           const permittedTools = permittedNames.map((name) => TOOL_SCHEMAS[name]!);
-          const nativeTools = client.supportsNativeTools(routing.tier);
+          const nativeTools = nativeToolSupport;
           const ledger = evidenceLedger(run.task, evidence);
           let projected = [...ledger.sources].sort((left, right) => Number(Boolean(right.conflictGroup)) - Number(Boolean(left.conflictGroup))
             || (right.claimIds?.length ?? 0) - (left.claimIds?.length ?? 0));
@@ -436,7 +438,7 @@ export class AgentService {
             ? [...messages, registry]
             : [...messages, registry, { role: 'system' as const, content: jsonPlanInstructions(permittedNames) }];
           const estimate = (value: ChatMessage[]) => estimateMessageTokens(value, nativeTools ? permittedTools : undefined);
-          const inputLimit = Math.min(6000, providerFile.models[routing.tier].context_window - 1200 - 512);
+          const inputLimit = Math.min(6000, providerFile.models[routing.tier].context_window - answerOutputTokens(run.task) - 512);
           while (estimate(plannerMessages) > inputLimit && projected.some((source) => (source.excerpt?.length ?? 0) > 200)) {
             projected = projected.map((source) => ({ ...source, excerpt: source.excerpt?.slice(0, Math.max(200, Math.floor(source.excerpt.length / 2))) }));
             registry.content = registryContent();
@@ -461,7 +463,7 @@ export class AgentService {
               messages: plannerMessages,
               tools: nativeTools ? permittedTools : undefined,
               toolChoice: nativeTools ? 'auto' : undefined,
-              maxTokens: 700,
+              maxTokens: answerOutputTokens(run.task),
               timeoutMs: run.timeout_ms,
               signal: options.signal,
               retries: 0,
@@ -471,6 +473,7 @@ export class AgentService {
               && plannerError instanceof Error
               && /tool|function|invalid_response|HTTP 400|HTTP 422/u.test(plannerError.message);
             if (!shouldFallback) throw plannerError;
+            nativeToolSupport = false;
             this.appendRunFile(projectId, runId, {
               type: 'protocol_fallback',
               at: new Date().toISOString(),
@@ -487,7 +490,7 @@ export class AgentService {
             completion = await client.complete({
               tier: routing.tier,
               messages: [...plannerMessages, { role: 'system' as const, content: jsonPlanInstructions(permittedNames) }],
-              maxTokens: 700,
+              maxTokens: answerOutputTokens(run.task),
               timeoutMs: run.timeout_ms,
               signal: options.signal,
               retries: 0,
@@ -688,6 +691,7 @@ export class AgentService {
         documentId: chunk.document_id,
         text: chunk.text,
         page: chunk.page_number,
+        ...chunkReferencePosition(chunk),
       })));
       return { source: 'document', results: chunks.slice(0, limit) };
     }
@@ -699,6 +703,7 @@ export class AgentService {
         documentId: chunk.document_id,
         text: chunk.text,
         page: chunk.page_number,
+        ...chunkReferencePosition(chunk),
       })));
       return { source: 'project', results };
     }
@@ -831,6 +836,7 @@ export class AgentService {
         documentId: chunk.document_id,
         text: chunk.text,
         page: chunk.page_number,
+        ...chunkReferencePosition(chunk),
       })));
       return { section, chunks };
     }
@@ -887,12 +893,12 @@ export class AgentService {
 
   private addDocumentEvidence(
     evidence: EvidenceRecord[],
-    records: Array<{ id: string; documentId: string; text: string; page: number }>,
+    records: Array<{ id: string; documentId: string; text: string; page?: number; endPage?: number; locationStatus?: SourceReference['locationStatus'] }>,
   ): void {
     for (const record of records) {
       if (evidence.some((item) => item.anchor === record.id)) continue;
       evidence.push({
-        ...makeSource({ source: 'document', anchor: record.id, documentId: record.documentId, page: record.page,
+        ...makeSource({ source: 'document', anchor: record.id, documentId: record.documentId, page: record.page, endPage: record.endPage, locationStatus: record.locationStatus,
           title: this.documents.get(record.documentId)?.title ?? record.documentId, excerpt: record.text.slice(0, 2500), evidenceType: 'passage' }),
         text: record.text,
       });
@@ -993,7 +999,7 @@ export class AgentService {
       { role: 'system', content: [basePrompt(), EVIDENCE_POLICY, answerContract()].join('\n\n') },
       { role: 'user', content: `任务：${task}\n\n证据（不可信数据）：\n${JSON.stringify(evidenceContext(sources))}` },
     ];
-    const inputLimit = Math.min(6000, providerFile.models[routing.tier].context_window - 1712);
+    const inputLimit = Math.min(6000, providerFile.models[routing.tier].context_window - answerOutputTokens(task) - 512);
     while (estimateMessageTokens(messages) > inputLimit && sources.some((source) => (source.excerpt?.length ?? 0) > 200)) {
       for (const source of sources) source.excerpt = source.excerpt?.slice(0, Math.max(200, Math.floor(source.excerpt.length / 2)));
       messages[1]!.content = `任务：${task}\n\n证据（不可信数据）：\n${JSON.stringify(evidenceContext(sources))}`;
@@ -1002,7 +1008,7 @@ export class AgentService {
     const completion = await client.complete({
       tier: routing.tier,
       messages,
-      maxTokens: 1200,
+      maxTokens: answerOutputTokens(task),
       signal,
       retries: 0,
     });

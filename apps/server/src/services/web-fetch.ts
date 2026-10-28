@@ -17,6 +17,28 @@ const MAX_REDIRECTS = 5;
 const MAX_BYTES = 2_000_000;
 const MAX_CONTENT_CHARS = 100_000;
 
+export const pageFailureCodes = ['access_denied', 'rate_limited', 'http_error', 'timeout', 'dns_failure', 'tls_failure', 'blocked_destination', 'unusable_content', 'unavailable'] as const;
+export type PageFailureCode = typeof pageFailureCodes[number];
+
+export class PageReadError extends Error {
+  constructor(readonly code: PageFailureCode, readonly status?: number) {
+    super(`Page unavailable: ${code}${status ? ` (HTTP ${status})` : ''}`);
+    this.name = 'PageReadError';
+  }
+}
+
+export function pageReadFailure(error: unknown): { code: PageFailureCode; status?: number } {
+  if (error instanceof PageReadError) return { code: error.code, ...(error.status ? { status: error.status } : {}) };
+  if (!(error instanceof Error)) return { code: 'unavailable' };
+  if (['TimeoutError', 'AbortError'].includes(error.name)) return { code: 'timeout' };
+  const cause = error.cause;
+  const code = cause && typeof cause === 'object' && 'code' in cause ? cause.code : 'code' in error ? error.code : undefined;
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return { code: 'dns_failure' };
+  if (code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'ETIMEDOUT') return { code: 'timeout' };
+  if (typeof code === 'string' && ['CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN', 'ERR_TLS_CERT_ALTNAME_INVALID'].includes(code)) return { code: 'tls_failure' };
+  return { code: 'unavailable' };
+}
+
 export class WebFetchService {
   constructor(
     private readonly cache?: CacheRepository,
@@ -48,7 +70,7 @@ export class WebFetchService {
         currentUrl = validatePublicHttpUrl(new URL(location, currentUrl));
         continue;
       }
-      if (!response.ok) throw new Error(`Web page returned HTTP ${response.status}`);
+      if (!response.ok) throw new PageReadError(response.status === 429 ? 'rate_limited' : [401, 402, 403].includes(response.status) ? 'access_denied' : 'http_error', response.status);
       const contentType = response.headers.get('content-type') ?? '';
       if (!isSupportedContentType(contentType)) {
         throw new Error(`Unsupported web content type: ${contentType || 'unknown'}`);
@@ -111,7 +133,7 @@ export class WebFetchService {
 
 async function fetchWithTimeout(url: URL, signal?: AbortSignal) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('Web page fetch timed out')), 20_000);
+  const timer = setTimeout(() => controller.abort(new PageReadError('timeout')), 20_000);
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let dispatcher: Agent | undefined;
   let abortDns: (() => void) | undefined;

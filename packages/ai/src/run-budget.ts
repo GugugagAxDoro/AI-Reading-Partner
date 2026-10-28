@@ -54,9 +54,9 @@ export class RunBudget {
     this.toolCalls++;
   }
 
-  canExpand(finalInput = 6000) {
+  canExpand(finalInput = 6000, finalOutput = 2400) {
     return this.remainingMs > 1000 && this.calls.length + 1 < (this.limits.maxModelCalls ?? 12)
-      && this.remainingTokens > finalInput + 2400;
+      && this.remainingTokens > finalInput + finalOutput;
   }
 
   snapshot() {
