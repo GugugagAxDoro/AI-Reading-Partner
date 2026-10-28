@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, BookOpen, Copy, FilePlus, Globe, Network, Plus, RotateCcw, Settings2, Square, X } from 'lucide-react';
 import { MarkdownContent, type StableTarget } from './MarkdownContent';
+import { serializeReferences } from '@ai-reading-partner/core/references';
 import { SelectionQuote, type QuoteSnapshot } from './SelectionQuote';
 
 interface Conversation { id: string; title: string; web_enabled: number }
@@ -180,7 +181,8 @@ export function ConversationPanel({ projectId, documentId, quote, shortcut, onPa
         return <article key={message.id} className={`chat-message ${message.role}`} data-message-id={message.id} data-status={message.status}>
           <header><strong>{message.role === 'user' ? '你' : '阅读助手'}</strong><span className="muted">{metadata.cached ? '本地缓存' : ''}{({ pending: '等待生成', streaming: '正在生成', cancelled: '已停止', failed: '生成失败' } as Record<string, string>)[message.status]}</span></header>
           {selected && message.role === 'user' && <SelectionQuote quote={selected} onNavigate={() => onPage(selected.page)} />}
-          <MarkdownContent onNavigate={onNavigate} targetExists={targetExists} onPage={onPage}>{message.markdown}</MarkdownContent>
+          <MarkdownContent sources={metadata.sources ?? []} onNavigate={onNavigate} targetExists={targetExists} onPage={onPage}>{message.markdown}</MarkdownContent>
+          {metadata.webSearch?.warning && <p className="retrieval-status" role="status">{metadata.webSearch.warning}</p>}
           {message.error && <p className="inline-error" role="alert">{message.error}</p>}
           {metadata.historyOmitted && <p className="muted">历史超出预算，未带入本次请求。</p>}
           {metadata.runId && <details className="research-timeline"><summary>研究过程</summary>{metadata.steps?.map((step: { id: string; title: string; payload_json: string }) => {
@@ -194,7 +196,7 @@ export function ConversationPanel({ projectId, documentId, quote, shortcut, onPa
               }}>确认执行</button>}
             </div>}</div>;
           })}<a href={`/api/projects/${projectId}/agent/runs/${metadata.runId}`} target="_blank" rel="noreferrer">运行记录</a></details>}
-          {message.role === 'assistant' && <div className="message-sources">{metadata.sources?.map((source: { page?: number; documentId?: string; title?: string; url?: string; id?: string }, index: number) => {
+          {message.role === 'assistant' && !message.markdown.includes('[[ref:') && <div className="message-sources">{metadata.sources?.map((source: { page?: number; documentId?: string; title?: string; url?: string; id?: string }, index: number) => {
             if (source.page) {
               const target: StableTarget = { kind: 'doc', id: source.documentId ?? documentId, label: source.title ?? `P${source.page}`, page: source.page };
               const exists = targetExists(target);
@@ -205,7 +207,7 @@ export function ConversationPanel({ projectId, documentId, quote, shortcut, onPa
           })}</div>}
           {message.role === 'assistant' && !['pending', 'streaming'].includes(message.status) && <footer className="message-controls">
             {message.status === 'completed' && <><button title="追问此回答" onClick={() => updateDraft({ parents: draft.parents.includes(message.id) ? draft.parents : [...draft.parents, message.id].slice(-2) })}>追问</button>
-              <button className="icon-button" title="复制回答" aria-label="复制回答" onClick={() => { void navigator.clipboard.writeText(message.markdown).catch(() => setError('复制失败')); }}><Copy size={14} /></button>
+              <button className="icon-button" title="复制回答" aria-label="复制回答" onClick={() => { void navigator.clipboard.writeText(serializeReferences(message.markdown, metadata.sources ?? [])).catch(() => setError('复制失败')); }}><Copy size={14} /></button>
               <button className="icon-button" title="保存为笔记" aria-label="保存为笔记" onClick={() => void save(message)}><FilePlus size={14} /></button></>}
             {message.status === 'completed' && <button className="icon-button" title="生成脑图" aria-label="生成脑图" onClick={() => {
               void request<{ noteId?: string }>(`${base}/messages/${message.id}/mindmap`, 'POST').then(() => request<{ id: string }>(`${base}/messages/${message.id}/note`, 'POST')).then((note) => {

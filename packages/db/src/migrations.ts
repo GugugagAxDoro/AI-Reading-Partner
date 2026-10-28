@@ -285,7 +285,7 @@ const schemaV1: readonly SqlStatement[] = [
 
 export function migrate(database: Database): void {
   const currentVersion = Number(database.pragma('user_version', { simple: true }));
-  const latestVersion = 2;
+  const latestVersion = 3;
   if (currentVersion === latestVersion) return;
   if (currentVersion > latestVersion) {
     throw new Error(`SQLite schema version ${currentVersion} is newer than supported version ${latestVersion}`);
@@ -334,6 +334,10 @@ export function migrate(database: Database): void {
         value_json TEXT NOT NULL
       );
     `);
+    database.exec(`CREATE TABLE IF NOT EXISTS term_variants (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      normalized_term TEXT NOT NULL, compatibility TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+    ); CREATE INDEX IF NOT EXISTS idx_term_variants_lookup ON term_variants(project_id,normalized_term,compatibility);`);
     database.pragma(`user_version = ${latestVersion}`);
   })();
 }

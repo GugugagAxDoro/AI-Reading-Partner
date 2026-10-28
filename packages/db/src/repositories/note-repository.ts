@@ -170,7 +170,7 @@ export class NoteRepository {
           note.project_id,
           note.id,
           match[1] as NoteLinkRecord['target_type'],
-          match[2]!,
+          match[1] === 'doc' ? match[2]!.replace(/#page=\d+$/u, '') : match[2]!,
           match[3] ?? `${match[1]}:${match[2]}`,
           now,
         );

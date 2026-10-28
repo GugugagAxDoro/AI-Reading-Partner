@@ -1,4 +1,4 @@
-import { ProviderConfigError, type ProviderConfig } from '@ai-reading-partner/ai';
+import type { ProviderFile } from '@ai-reading-partner/ai';
 import { createNormalizedHash } from '@ai-reading-partner/core';
 import { CacheRepository } from '@ai-reading-partner/db';
 
@@ -8,11 +8,12 @@ export interface SearxngResult {
   snippet: string;
   engine?: string;
   score?: number;
+  fetchedAt?: string;
 }
 
 export class SearxngClient {
   constructor(
-    private readonly providerConfig: ProviderConfig,
+    private readonly providerConfig: { current: Pick<ProviderFile, 'searxng'> },
     private readonly cache?: CacheRepository,
   ) {}
 
@@ -73,7 +74,6 @@ export class SearxngClient {
         content: JSON.stringify(results),
         status: 'ready',
         sourceMetadata: {
-          endpoint: url.toString(),
           query: generatedQuery,
           result_count: results.length,
           fetched_at: new Date().toISOString(),
@@ -115,8 +115,8 @@ function parseSearxngResponse(payload: unknown, limit: number): SearxngResult[] 
       if (!isHttpUrl(url)) return null;
       return {
         url,
-        title: typeof candidate.title === 'string' ? candidate.title : url,
-        snippet: typeof candidate.content === 'string' ? candidate.content : '',
+        title: typeof candidate.title === 'string' ? candidate.title.slice(0, 300) : url,
+        snippet: typeof candidate.content === 'string' ? candidate.content.slice(0, 3000) : '',
         engine: typeof candidate.engine === 'string' ? candidate.engine : undefined,
         score: typeof candidate.score === 'number' ? candidate.score : undefined,
       };

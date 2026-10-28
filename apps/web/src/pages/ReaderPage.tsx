@@ -7,6 +7,7 @@ import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { ArrowLeft, ArrowRight, Bookmark, Menu, MessageSquare, PanelLeftClose, PanelRightClose, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { MarkdownContent } from '../components/MarkdownContent';
 import { ConversationPanel, type Shortcut } from '../components/ConversationPanel';
+import { serializeReferences, summaryReferences, type SourceReference } from '@ai-reading-partner/core/references';
 import type { QuoteSnapshot } from '../components/SelectionQuote';
 
 interface DocumentDetail {
@@ -35,14 +36,11 @@ interface AiActionResponse {
   promptVersion: string;
   modelId: string | null;
   providerId: string | null;
-  sources: Array<{
-    type: 'selection' | 'page' | 'chunk';
-    page: number;
-    excerpt: string;
-  }>;
+  sources: SourceReference[];
 }
 
 interface SummaryItem {
+  structure_json: string | null;
   id: string;
   scope: 'book' | 'section' | 'project';
   target_id: string;
@@ -91,6 +89,7 @@ interface TermCacheItem {
   id: string;
   display_term: string;
   explanation: string;
+  sources_json?: string;
 }
 
 interface ContentCacheItem {
@@ -99,6 +98,7 @@ interface ContentCacheItem {
   action: string;
   normalized_text: string;
   answer: string;
+  sources_json?: string;
 }
 
 interface StableLinkToken {
@@ -253,6 +253,7 @@ export default function ReaderPage() {
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop, { once: true });
   };
   const [aiResult, setAiResult] = useState<AiActionResponse | null>(null);
+  const [termChoices, setTermChoices] = useState<TermCacheItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [scale, setScale] = useState(1.2);
   const [stageWidth, setStageWidth] = useState(0);
@@ -423,6 +424,13 @@ export default function ReaderPage() {
     };
   }, [documentId]);
 
+  const openTermPreview = useCallback((term: TermCacheItem) => {
+    setTermChoices(termCachesRef.current.filter((item) => collapseWhitespace(item.display_term).toLowerCase() === collapseWhitespace(term.display_term).toLowerCase()));
+    setSelection(term.display_term); setSelectionAnchor(null);
+    setAiResult({ answer: term.explanation, cached: true, promptVersion: '', modelId: null, providerId: null,
+      sources: JSON.parse(term.sources_json ?? '[]') });
+  }, []);
+
   const markTermCache = useCallback((pageNumber: number) => {
     const textLayer = textLayerRefs.current.get(pageNumber);
     if (!textLayer) return;
@@ -445,23 +453,14 @@ export default function ReaderPage() {
         marker.textContent = node.data.slice(index, index + normalizedTerm.length);
         marker.addEventListener('click', (event) => {
           event.stopPropagation();
-          setSelection(term.display_term);
-          setSelectionAnchor(null);
-          setAiResult({
-            answer: term.explanation,
-            cached: true,
-            promptVersion: '',
-            modelId: null,
-            providerId: null,
-            sources: [],
-          });
+          openTermPreview(term);
         });
         const after = node.splitText(index + normalizedTerm.length);
         node.parentElement?.insertBefore(marker, after);
         node.data = node.data.slice(0, index);
       }
     }
-  }, []);
+  }, [openTermPreview]);
 
   useEffect(() => {
     termCachesRef.current = termCaches;
@@ -744,7 +743,7 @@ export default function ReaderPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: selection.slice(0, 40) || '动态笔记',
-          markdown: aiResult.answer,
+          markdown: serializeReferences(aiResult.answer, aiResult.sources),
         }),
       });
       const noteList = await api<NoteItem[]>(`/api/projects/${projectId}/notes`);
@@ -776,16 +775,7 @@ export default function ReaderPage() {
     if (token.kind === 'term') {
       const term = termCaches.find((item) => item.id === token.id);
       if (!term) return;
-      setSelection(term.display_term);
-      setSelectionAnchor(null);
-      setAiResult({
-        answer: term.explanation,
-        cached: true,
-        promptVersion: '',
-        modelId: null,
-        providerId: null,
-        sources: [],
-      });
+      openTermPreview(term);
       return;
     }
     if (token.kind === 'note') {
@@ -893,7 +883,7 @@ export default function ReaderPage() {
               <details key={summary.id} className="summary-item" open={summary.scope === 'book' || summary.target_id === sections.filter((section) => section.start_page <= currentPage).at(-1)?.id}>
                 <summary><strong>{summary.scope === 'book' ? '全书总结' : summary.scope === 'project' ? '项目总结' : sections.find((section) => section.id === summary.target_id)?.title ?? '章节小结'}</strong>
                 <span className={`badge badge-${summary.status}`}>{({ ready: '已完成', failed: '失败', pending: '等待生成', processing: '生成中' })[summary.status]}</span></summary>
-                <MarkdownContent onNavigate={followStableLink} targetExists={stableLinkTargetExists} onPage={goToPage}>{summary.markdown ?? summary.error ?? '等待生成。'}</MarkdownContent>
+                <MarkdownContent sources={summaryReferences(summary.structure_json)} onNavigate={followStableLink} targetExists={stableLinkTargetExists} onPage={goToPage}>{summary.markdown ?? summary.error ?? '等待生成。'}</MarkdownContent>
                 {summary.status === 'failed' && <button onClick={() => {
                   const owner = documentId;
                   void api<SummaryItem>(`/api/projects/${projectId}/documents/${documentId}/${summary.scope === 'book' ? 'summaries/book' : `sections/${summary.target_id}/summary`}`, { method: 'POST' })
@@ -1016,14 +1006,14 @@ export default function ReaderPage() {
                       type="button"
                       className="content-cache-marker"
                       title={cache.normalized_text.slice(0, 120)}
-                      onClick={() => setAiResult({
+                      onClick={() => { setTermChoices([]); setAiResult({
                         answer: cache.answer,
                         cached: true,
                         promptVersion: '',
                         modelId: null,
                         providerId: null,
-                        sources: [],
-                      })}
+                        sources: JSON.parse(cache.sources_json ?? '[]'),
+                      }); }}
                     >
                       {cache.action === 'vocabulary_explanation' ? '词汇' : cache.action === 'content_interpretation' ? '解读' : '问答'}
                     </button>
@@ -1065,7 +1055,11 @@ export default function ReaderPage() {
         <button onClick={() => { setShortcut({ id: crypto.randomUUID(), action: 'content_interpretation', quote: selectionAnchor }); setPopover(null); }}>深度解读</button>
       </div>}
       {aiResult && <div className="cache-preview" role="dialog" aria-modal="true" aria-label="缓存解释"><header><strong>历史解释</strong><button className="icon-button" title="关闭解释" aria-label="关闭解释" onClick={() => setAiResult(null)}><X size={16} /></button></header>
-        <MarkdownContent onNavigate={followStableLink} targetExists={stableLinkTargetExists} onPage={goToPage}>{aiResult.answer}</MarkdownContent>
+        {termChoices.length > 1 && <select aria-label="词汇历史解释" value={termChoices.find((item) => item.explanation === aiResult.answer)?.id ?? ''}
+          onChange={(event) => { const term = termChoices.find((item) => item.id === event.target.value); if (term) openTermPreview(term); }}>
+          {termChoices.map((term) => <option key={term.id} value={term.id}>{(JSON.parse(term.sources_json ?? '[]') as SourceReference[])[0]?.title ?? term.display_term} · {term.explanation.slice(0, 70)}</option>)}
+        </select>}
+        <MarkdownContent sources={aiResult.sources} onNavigate={followStableLink} targetExists={stableLinkTargetExists} onPage={goToPage}>{aiResult.answer}</MarkdownContent>
         <button onClick={() => void createDynamicNote()}>保存为动态笔记</button>
       </div>}
     </div>

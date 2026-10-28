@@ -23,7 +23,8 @@ export class MindmapService {
     const filePath = join(outputDirectory, `${noteId}.html`);
     const transformer = new Transformer();
     const { root } = transformer.transform(note.markdown);
-    const html = buildMindmapHtml(note.title, root);
+    const citations = note.markdown.split('\n').filter((line) => /^\[\^[^\]]+\]:/u.test(line)).join('\n');
+    const html = buildMindmapHtml(note.title, root, citations);
     writeFileSync(filePath, html, 'utf8');
     return { noteId, filePath };
   }
@@ -35,7 +36,7 @@ export class MindmapService {
   }
 }
 
-function buildMindmapHtml(title: string, root: unknown): string {
+function buildMindmapHtml(title: string, root: unknown, citations: string): string {
   const rendererBundle = readFileSync(
     new URL('../../public/markmap-bundle.js', import.meta.url),
     'utf8',
@@ -49,10 +50,13 @@ function buildMindmapHtml(title: string, root: unknown): string {
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; font-family: Inter, "PingFang SC", sans-serif; }
     #mindmap { display: block; width: 100vw; height: 100vh; }
+    .sources { position: fixed; bottom: 12px; right: 12px; max-width: min(480px, 90vw); max-height: 40vh; overflow: auto; padding: 8px; background: white; border: 1px solid #ddd; font-size: 12px; }
+    .sources pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
   <svg id="mindmap"></svg>
+  ${citations ? `<details class="sources"><summary>来源</summary><pre>${escapeHtml(citations)}</pre></details>` : ''}
   <script>${rendererBundle}</script>
   <script>
     const root = ${JSON.stringify(root).replaceAll('<', '\\u003c')};

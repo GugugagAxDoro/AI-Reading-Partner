@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { MoreHorizontal } from 'lucide-react';
 import { MarkdownContent } from '../components/MarkdownContent';
+import { summaryReferences } from '@ai-reading-partner/core/references';
 
 interface Project {
   id: string;
@@ -66,7 +67,7 @@ export default function LibraryPage() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState('recent');
-  const [projectSummary, setProjectSummary] = useState<{ markdown: string | null; status: string } | null>(null);
+  const [projectSummary, setProjectSummary] = useState<{ markdown: string | null; status: string; structure_json?: string | null } | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   useEffect(() => {
     let cancelled = false; setProjectSummary(null);
@@ -244,7 +245,7 @@ export default function LibraryPage() {
           <div className="library-discovery"><input aria-label="搜索书名" placeholder="搜索书名" value={query} onChange={(event) => setQuery(event.target.value)} />
             <select aria-label="书籍排序" value={sort} onChange={(event) => setSort(event.target.value)}><option value="recent">最近阅读</option><option value="added">最近添加</option><option value="title">书名</option></select></div>
           <details className="project-summary"><summary>项目概览</summary>
-            {projectSummary?.markdown && <MarkdownContent targetExists={(target) => target.kind === 'doc' && documents.some((item) => item.id === target.id)} onNavigate={(target) => { if (target.kind === 'doc') window.location.assign(`/read/${selectedProject.id}/${target.id}`); }}>{projectSummary.markdown}</MarkdownContent>}
+            {projectSummary?.markdown && <MarkdownContent sources={summaryReferences(projectSummary.structure_json)} targetExists={(target) => target.kind === 'doc' && documents.some((item) => item.id === target.id)} onNavigate={(target) => { if (target.kind === 'doc') window.location.assign(`/read/${selectedProject.id}/${target.id}#page=${target.page ?? 1}`); }}>{projectSummary.markdown}</MarkdownContent>}
             <button disabled={summaryBusy} onClick={() => { setSummaryBusy(true); void api<typeof projectSummary>(`/api/projects/${selectedProjectId}/summary`, { method: 'POST' }).then(setProjectSummary).catch((reason) => setError(reason.message)).finally(() => setSummaryBusy(false)); }}>{summaryBusy ? '生成中' : projectSummary?.markdown ? '更新项目总结' : '生成项目总结'}</button>
           </details>
           <section className="book-grid">

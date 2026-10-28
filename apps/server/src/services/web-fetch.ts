@@ -1,5 +1,8 @@
 import { CacheRepository, type WebCacheRecord } from '@ai-reading-partner/db';
 import { ModelClient, ProviderConfigError, type ProviderConfig } from '@ai-reading-partner/ai';
+import { lookup } from 'node:dns/promises';
+import { BlockList, isIP } from 'node:net';
+import { Agent, fetch as safeFetch } from 'undici';
 
 export interface FetchedWebPage {
   url: string;
@@ -16,15 +19,15 @@ const MAX_CONTENT_CHARS = 100_000;
 
 export class WebFetchService {
   constructor(
-    private readonly cache: CacheRepository,
+    private readonly cache?: CacheRepository,
     private readonly providerConfig?: ProviderConfig,
   ) {}
 
   async fetchPage(projectId: string, rawUrl: string, signal?: AbortSignal): Promise<FetchedWebPage> {
     signal?.throwIfAborted();
     const url = validatePublicHttpUrl(rawUrl);
-    const cached = this.cache.findWeb(projectId, url.toString(), 'fetch');
-    if (cached && cached.status === 'ready' && cached.content && new Date(cached.expires_at) > new Date()) {
+    const cached = this.cache?.findWeb(projectId, url.toString(), 'fetch');
+    if (cached && cached.status === 'ready' && cached.content && Date.now() - Date.parse(cached.fetched_at) < 86400000 && new Date(cached.expires_at) > new Date()) {
       return {
         url: cached.url,
         finalUrl: safeSourceMetadata(cached.source_metadata_json).final_url ?? cached.url,
@@ -52,7 +55,7 @@ export class WebFetchService {
       }
       const contentLength = Number(response.headers.get('content-length') ?? 0);
       if (contentLength > MAX_BYTES) throw new Error('Web page is too large');
-      const raw = await response.text();
+      const raw = response.raw;
       if (raw.length > MAX_BYTES) throw new Error('Web page is too large');
       const title = contentType.includes('text/html') ? extractTitle(raw) : null;
       const content = (contentType.includes('text/html') ? extractReadableText(raw) : raw)
@@ -63,7 +66,7 @@ export class WebFetchService {
       const summary = await this.summarize(content, title ?? currentUrl.toString(), signal);
       signal?.throwIfAborted();
 
-      const record = this.cache.saveWeb({
+      const record = this.cache?.saveWeb({
         projectId,
         url: url.toString(),
         queryHash: 'fetch',
@@ -78,7 +81,7 @@ export class WebFetchService {
           byte_limit: MAX_BYTES,
         },
       });
-      return toFetchedPage(record);
+      return record ? toFetchedPage(record) : { url: url.toString(), finalUrl: currentUrl.toString(), title, content, cached: false };
     }
     throw new Error('Too many redirects');
   }
@@ -106,36 +109,66 @@ export class WebFetchService {
   }
 }
 
-async function fetchWithTimeout(url: URL, signal?: AbortSignal): Promise<Response> {
+async function fetchWithTimeout(url: URL, signal?: AbortSignal) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('Web page fetch timed out')), 20_000);
+  const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  let dispatcher: Agent | undefined;
+  let abortDns: (() => void) | undefined;
   try {
-    return await fetch(url, {
+    const hostname = url.hostname.replace(/^\[|\]$/gu, '');
+    const addresses = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await Promise.race([
+      lookup(hostname, { all: true }),
+      new Promise<never>((_resolve, reject) => {
+        if (combined.aborted) reject(combined.reason);
+        else { abortDns = () => reject(combined.reason); combined.addEventListener('abort', abortDns, { once: true }); }
+      }),
+    ]);
+    combined.throwIfAborted();
+    if (!addresses.length || addresses.some((entry) => isPrivateHost(entry.address))) throw new Error('Blocked resolved address');
+    const pinned = addresses[0]!;
+    dispatcher = new Agent({ connect: { lookup: (_host, options, callback) => {
+      if (options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
+      else callback(null, pinned.address, pinned.family);
+    } } });
+    const response = await safeFetch(url, {
       redirect: 'manual',
-      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+      dispatcher,
+      signal: combined,
       headers: {
         Accept: 'text/html,application/xhtml+xml,text/plain',
         'User-Agent': 'AIReadingPartner/0.1 (+local)',
       },
     });
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    if (Number(response.headers.get('content-length') ?? 0) > MAX_BYTES) throw new Error('Web page is too large');
+    if (response.body) for await (const chunk of response.body) {
+      length += chunk.byteLength;
+      if (length > MAX_BYTES) throw new Error('Web page is too large');
+      chunks.push(chunk);
+    }
+    return { status: response.status, ok: response.ok, headers: response.headers, raw: Buffer.concat(chunks).toString('utf8') };
   } finally {
     clearTimeout(timer);
+    if (abortDns) combined.removeEventListener('abort', abortDns);
+    await dispatcher?.destroy();
   }
 }
 
-function validatePublicHttpUrl(value: URL | string): URL {
+export function validatePublicHttpUrl(value: URL | string): URL {
   const url = typeof value === 'string' ? new URL(value) : value;
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`Blocked URL protocol: ${url.protocol}`);
   }
-  if (isPrivateHost(url.hostname)) {
+  if (url.username || url.password || isPrivateHost(url.hostname)) {
     throw new Error(`Blocked private or loopback host: ${url.hostname}`);
   }
   return url;
 }
 
-function isPrivateHost(hostname: string): boolean {
-  const value = hostname.toLowerCase().replace(/\.$/u, '');
+export function isPrivateHost(hostname: string): boolean {
+  const value = hostname.toLowerCase().replace(/^\[|\]$/gu, '').replace(/\.$/u, '');
   if (value === 'localhost' || value.endsWith('.localhost')) return true;
   if (value === '::1' || value === '[::1]' || value === '0.0.0.0') return true;
   if (value.startsWith('127.')) return true;
@@ -146,8 +179,11 @@ function isPrivateHost(hostname: string): boolean {
     const second = Number(value.split('.')[1]);
     if (Number.isInteger(second) && second >= 16 && second <= 31) return true;
   }
-  if (value.startsWith('fd') || value.startsWith('fe80:')) return true;
-  return false;
+  if (!isIP(value)) return value.endsWith('.local') || value.endsWith('.internal');
+  const blocked = new BlockList();
+  for (const [address, prefix] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 4], ['240.0.0.0', 4]] as const) blocked.addSubnet(address, prefix, 'ipv4');
+  if (isIP(value) === 6) for (const [address, prefix] of [['::', 96], ['::ffff:0:0', 96], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['2001:db8::', 32]] as const) blocked.addSubnet(address, prefix, 'ipv6');
+  return blocked.check(value, isIP(value) === 6 ? 'ipv6' : 'ipv4');
 }
 
 function isSupportedContentType(contentType: string): boolean {

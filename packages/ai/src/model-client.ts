@@ -1,5 +1,6 @@
 import type { ProviderFile } from './provider-config';
 import { estimateTokens } from '@ai-reading-partner/core';
+import type { RunBudget } from './run-budget';
 
 export type ModelTier = 'light' | 'strong';
 
@@ -38,6 +39,7 @@ export interface CompletionRequest {
   timeoutMs?: number;
   retries?: number;
   signal?: AbortSignal;
+  onToolCalls?: (calls: ToolCall[]) => void;
 }
 
 export function estimateMessageTokens(messages: ChatMessage[], tools?: ToolDefinition[]): number {
@@ -58,6 +60,7 @@ export interface CompletionResult {
   usage: CompletionUsage;
   model: string;
   providerId: string;
+  usageEstimated?: boolean;
 }
 
 export interface ModelClientError {
@@ -104,22 +107,24 @@ interface ChatCompletionResponse {
 }
 
 export class ModelClient {
-  constructor(private readonly config: ProviderFile) {}
+  constructor(private readonly config: ProviderFile, private readonly budget?: RunBudget) {}
 
   supportsNativeTools(tier: ModelTier): boolean {
-    return tier === 'strong' && this.config.models.strong.supports_tool_calling;
+    return this.config.models[tier].supports_tool_calling;
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResult> {
+    request = this.withBudget(request);
     this.validateBudget(request);
     const modelConfig = this.config.models[request.tier];
     const provider = this.config.providers[modelConfig.provider];
     if (!provider) throw new ModelRequestError({ code: 'unconfigured', message: `Unknown provider: ${modelConfig.provider}` });
 
     const timeoutMs = request.timeoutMs ?? 120_000;
-    const maxRetries = request.retries ?? 2;
+    const maxRetries = Math.min(request.retries ?? 1, 1);
     let attempt = 0;
     for (;;) {
+      const attemptId = this.budget?.start(request);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(new Error('Model request timed out')), timeoutMs);
       const onRequestAbort = () => controller.abort(new Error('Model request aborted'));
@@ -138,7 +143,7 @@ export class ModelClient {
             temperature: request.temperature ?? 0.2,
             max_tokens: request.maxTokens ?? 1200,
             tools: request.tools && request.tools.length > 0 ? request.tools : undefined,
-            tool_choice: request.toolChoice,
+            tool_choice: request.tools?.length ? request.toolChoice : undefined,
           }),
           signal: controller.signal,
         });
@@ -155,11 +160,15 @@ export class ModelClient {
         if (!choice) {
           throw new ModelRequestError({ code: 'invalid_response', message: 'Provider returned no choices' });
         }
+        const reported = typeof payload.usage?.prompt_tokens === 'number' && typeof payload.usage?.completion_tokens === 'number';
         const usage = {
-          prompt_tokens: payload.usage?.prompt_tokens ?? 0,
-          completion_tokens: payload.usage?.completion_tokens ?? 0,
-          total_tokens: payload.usage?.total_tokens ?? 0,
+          prompt_tokens: payload.usage?.prompt_tokens ?? estimateMessageTokens(request.messages, request.tools),
+          completion_tokens: payload.usage?.completion_tokens ?? estimateTokens(choice.message?.content ?? JSON.stringify(choice.message?.tool_calls ?? [])),
+          total_tokens: 0,
         };
+        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        if (attemptId !== undefined) this.budget?.finish(attemptId, (choice.message?.content ?? '') + (choice.message?.tool_calls?.length ? JSON.stringify(choice.message.tool_calls) : ''), usage, reported);
+        if (choice.finish_reason === 'length') throw new ModelRequestError({ code: 'invalid_response', message: 'Model output budget exhausted before completion' });
         return {
           content: choice.message?.content ?? '',
           toolCalls: choice.message?.tool_calls ?? [],
@@ -167,6 +176,7 @@ export class ModelClient {
           usage,
           model: payload.model ?? modelConfig.model,
           providerId: modelConfig.provider,
+          usageEstimated: !reported,
         };
       } catch (error) {
         const normalized = error instanceof ModelRequestError ? error : normalizeNetworkError(error);
@@ -183,8 +193,13 @@ export class ModelClient {
     }
   }
 
-  async *streamText(request: Omit<CompletionRequest, 'tools' | 'toolChoice'>): AsyncGenerator<string, void, void> {
+  async *streamText(request: CompletionRequest): AsyncGenerator<string, void, void> {
+    request = this.withBudget(request);
     this.validateBudget(request);
+    const attemptId = this.budget?.start(request);
+    let generated = '';
+    let streamedUsage: CompletionUsage | undefined;
+    const toolCalls = new Map<number, ToolCall>();
     const modelConfig = this.config.models[request.tier];
     const provider = this.config.providers[modelConfig.provider];
     if (!provider) throw new ModelRequestError({ code: 'unconfigured', message: `Unknown provider: ${modelConfig.provider}` });
@@ -208,6 +223,8 @@ export class ModelClient {
           temperature: request.temperature ?? 0.2,
           max_tokens: request.maxTokens ?? 1200,
           stream: true,
+          tools: request.tools?.length ? request.tools : undefined,
+          tool_choice: request.tools?.length ? request.toolChoice : undefined,
         }),
         signal: controller.signal,
       });
@@ -223,6 +240,7 @@ export class ModelClient {
       const decoder = new TextDecoder();
       let buffer = '';
       let finished = false;
+      let outputLimited = false;
       for await (const chunk of response.body) {
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split(/\r?\n/);
@@ -231,14 +249,27 @@ export class ModelClient {
           const trimmed = line.trim();
           if (!trimmed.startsWith('data:')) continue;
           const data = trimmed.slice(5).trim();
-          if (data === '[DONE]') return;
+          if (data === '[DONE]') {
+            if (outputLimited) throw new ModelRequestError({ code: 'invalid_response', message: 'Model output budget exhausted before completion' });
+            request.onToolCalls?.([...toolCalls.values()]); return;
+          }
           try {
             const payload = JSON.parse(data) as {
-              choices?: Array<{ delta?: { content?: string | null }; finish_reason?: string | null }>;
+              choices?: Array<{ delta?: { content?: string | null; tool_calls?: Array<{ index: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string | null }>;
+              usage?: CompletionUsage;
             };
+            if (typeof payload.usage?.prompt_tokens === 'number' && typeof payload.usage.completion_tokens === 'number') streamedUsage = payload.usage;
             if (payload.choices?.[0]?.finish_reason) finished = true;
+            if (payload.choices?.[0]?.finish_reason === 'length') outputLimited = true;
+            for (const delta of payload.choices?.[0]?.delta?.tool_calls ?? []) {
+              const call = toolCalls.get(delta.index) ?? { id: '', type: 'function' as const, function: { name: '', arguments: '' } };
+              if (delta.id) call.id = delta.id;
+              if (delta.function?.name) call.function.name += delta.function.name;
+              if (delta.function?.arguments) call.function.arguments += delta.function.arguments;
+              toolCalls.set(delta.index, call);
+            }
             const text = payload.choices?.[0]?.delta?.content;
-            if (text) yield text;
+            if (text) { generated += text; yield text; }
           } catch {
             throw new ModelRequestError({ code: 'invalid_response', message: 'Invalid streaming response' });
           }
@@ -246,10 +277,19 @@ export class ModelClient {
       }
       if (buffer.trim() === 'data: [DONE]') finished = true;
       if (!finished) throw new ModelRequestError({ code: 'invalid_response', message: 'Stream interrupted before completion' });
+      if (outputLimited) throw new ModelRequestError({ code: 'invalid_response', message: 'Model output budget exhausted before completion' });
+      request.onToolCalls?.([...toolCalls.values()]);
     } finally {
+      if (attemptId !== undefined) this.budget?.finish(attemptId, generated + (toolCalls.size ? JSON.stringify([...toolCalls.values()]) : ''), streamedUsage, Boolean(streamedUsage));
       clearTimeout(timer);
       request.signal?.removeEventListener('abort', onAbort);
     }
+  }
+
+  private withBudget(request: CompletionRequest): CompletionRequest {
+    if (!this.budget) return request;
+    return { ...request, timeoutMs: Math.min(request.timeoutMs ?? 120000, this.budget.remainingMs),
+      signal: request.signal ? AbortSignal.any([request.signal, this.budget.signal]) : this.budget.signal };
   }
 
   private validateBudget(request: CompletionRequest): void {

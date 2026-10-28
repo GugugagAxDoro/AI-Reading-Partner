@@ -52,6 +52,7 @@ export interface CachedTerm {
   normalized_term: string;
   display_term: string;
   explanation: string;
+  sources_json: string;
   created_at: string;
   updated_at: string;
 }
@@ -64,12 +65,30 @@ export interface CachedContent {
   normalized_text: string;
   selection_hash: string;
   answer: string;
+  sources_json: string;
   created_at: string;
   updated_at: string;
 }
 
 export class CacheRepository {
   constructor(private readonly database: Database) {}
+
+  findVariant(projectId: string, term: string, compatibility: string): TermCacheRecord | undefined {
+    const row = this.database.prepare('SELECT payload_json FROM term_variants WHERE project_id=? AND normalized_term=? AND compatibility=? ORDER BY created_at DESC LIMIT 1')
+      .get(projectId, term, compatibility) as { payload_json: string } | undefined;
+    return row ? JSON.parse(row.payload_json) as TermCacheRecord : undefined;
+  }
+
+  saveVariant(input: Parameters<CacheRepository['saveTerm']>[0] & { compatibility: string }): TermCacheRecord {
+    const now = new Date().toISOString();
+    const record: TermCacheRecord = { id: randomUUID(), project_id: input.projectId, normalized_term: input.normalizedTerm,
+      display_term: input.displayTerm, explanation: input.explanation, sources_json: JSON.stringify(input.sources ?? []),
+      prompt_version: input.promptVersion ?? null, model_id: input.modelId ?? null, provider_id: input.providerId ?? null, created_at: now, updated_at: now };
+    this.database.prepare('INSERT INTO term_variants(id,project_id,normalized_term,compatibility,payload_json,created_at) VALUES(?,?,?,?,?,?)')
+      .run(record.id, input.projectId, input.normalizedTerm, input.compatibility, JSON.stringify(record), now);
+    if (!this.findTerm(input.projectId, input.normalizedTerm)) this.saveTerm(input);
+    return record;
+  }
 
   findTerm(projectId: string, normalizedTerm: string): TermCacheRecord | undefined {
     return this.database
@@ -220,14 +239,23 @@ export class CacheRepository {
   }
 
   listTerms(projectId: string): CachedTerm[] {
-    return this.database
+    const legacy = this.database
       .prepare(
-        `SELECT id, normalized_term, display_term, explanation, created_at, updated_at
+        `SELECT id, normalized_term, display_term, explanation, sources_json, created_at, updated_at
          FROM term_cache
          WHERE project_id = ?
          ORDER BY updated_at DESC`,
       )
       .all(projectId) as CachedTerm[];
+    const variants = this.database.prepare('SELECT normalized_term,compatibility,payload_json FROM term_variants WHERE project_id=? ORDER BY created_at DESC,rowid DESC')
+      .all(projectId) as Array<{ normalized_term: string; compatibility: string; payload_json: string }>;
+    const seen = new Set<string>();
+    const current = variants.filter((item) => {
+      const key = `${item.normalized_term}:${item.compatibility}`;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    }).map((item) => JSON.parse(item.payload_json) as CachedTerm);
+    return [...current.filter((variant) => !legacy.some((item) => item.normalized_term === variant.normalized_term && item.explanation === variant.explanation && item.sources_json === variant.sources_json)), ...legacy];
   }
 
   listContent(projectId: string, documentId?: string | null): CachedContent[] {
@@ -239,7 +267,7 @@ export class CacheRepository {
     }
     return this.database
       .prepare(
-        `SELECT id, document_id, page_number, action, normalized_text, selection_hash, answer, created_at, updated_at
+        `SELECT id, document_id, page_number, action, normalized_text, selection_hash, answer, sources_json, created_at, updated_at
          FROM content_cache
          WHERE ${conditions.join(' AND ')}
          ORDER BY updated_at DESC`,
@@ -304,11 +332,15 @@ export class CacheRepository {
   }
 
   clearExpired(now = new Date()): number {
-    return this.database.prepare('DELETE FROM web_cache WHERE expires_at <= ?').run(now.toISOString()).changes;
+    return this.database.prepare("UPDATE web_cache SET content=NULL,summary=NULL,status='stale' WHERE expires_at<=? AND (content IS NOT NULL OR summary IS NOT NULL OR status!='stale')")
+      .run(now.toISOString()).changes;
   }
 
   clearTermCache(projectId: string): number {
-    return this.database.prepare('DELETE FROM term_cache WHERE project_id = ?').run(projectId).changes;
+    return this.database.transaction(() => {
+      const variants = this.database.prepare('DELETE FROM term_variants WHERE project_id=?').run(projectId).changes;
+      return this.database.prepare('DELETE FROM term_cache WHERE project_id = ?').run(projectId).changes + variants;
+    })();
   }
 
   clearContentCache(projectId: string): number {
@@ -318,7 +350,7 @@ export class CacheRepository {
   clearWebCache(projectId: string, options: { expiredOnly?: boolean } = {}): number {
     if (options.expiredOnly) {
       return this.database
-        .prepare('DELETE FROM web_cache WHERE project_id = ? AND expires_at <= ?')
+        .prepare("UPDATE web_cache SET content=NULL,summary=NULL,status='stale' WHERE project_id=? AND expires_at<=? AND (content IS NOT NULL OR summary IS NOT NULL OR status!='stale')")
         .run(projectId, new Date().toISOString()).changes;
     }
     return this.database.prepare('DELETE FROM web_cache WHERE project_id = ?').run(projectId).changes;

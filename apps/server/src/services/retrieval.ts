@@ -53,7 +53,6 @@ export class RetrievalService {
   ): { current: RetrievedChunk[]; other: RetrievedChunk[] } {
     const currentDocumentId = options.currentDocumentId ?? null;
     const current = currentDocumentId ? this.searchCurrent(currentDocumentId, query, options) : [];
-    if (current.length >= 3) return { current, other: [] };
 
     const matchQuery = buildFtsQuery(query);
     const limit = Math.min(Math.max(1, options.limit ?? 5), 20);
@@ -75,7 +74,7 @@ export class RetrievalService {
     const other = rows
       .map((row) => ({ ...row, score: -row.bm25_rank }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, limit - current.length);
+      .slice(0, limit);
     return { current, other };
   }
 }

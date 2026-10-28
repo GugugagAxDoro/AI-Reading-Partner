@@ -1,4 +1,4 @@
-import { estimateTokens } from '@ai-reading-partner/core';
+import { estimateTokens, summaryReferences, type SourceReference } from '@ai-reading-partner/core';
 import {
   ChunkRepository,
   DocumentRepository,
@@ -13,6 +13,7 @@ import {
   buildChunkGroupSummaryMessages,
   buildSummaryMessages,
 } from './prompts';
+import { makeSource } from './evidence';
 
 export type SummaryScope = 'book' | 'section' | 'project';
 
@@ -80,11 +81,12 @@ export class SummaryService {
     });
     try {
       const chunks = this.chunks.list(documentId);
-      const evidence = await this.mapReduceEvidence(document.title, chunks.map((chunk) => ({
-        text: chunk.text,
+      const references = chunks.map((chunk) => makeSource({ source: 'document', documentId, title: document.title, page: chunk.page_number, anchor: chunk.id, evidenceType: 'passage' }));
+      const evidence = await this.mapReduceEvidence(document.title, chunks.map((chunk, index) => ({
+        text: `[[ref:${references[index]!.id}]]\n${chunk.text}`,
         sectionId: chunk.section_id,
       })), 'book');
-      const markdown = await this.finalizeSummary(document.title, null, 'book', evidence);
+      const markdown = await this.finalizeSummary(document.title, null, 'book', evidence, references);
       return this.summaries.save({
         scope: 'book',
         targetId: documentId,
@@ -92,6 +94,7 @@ export class SummaryService {
         documentId,
         status: 'ready',
         markdown,
+        structure: { references },
         promptVersion: SUMMARY_PROMPT_VERSION,
       });
     } catch (error) {
@@ -122,11 +125,12 @@ export class SummaryService {
     });
     try {
       const chunks = this.chunks.listBySection(sectionId);
-      const evidence = await this.mapReduceEvidence(document.title, chunks.map((chunk) => ({
-        text: chunk.text,
+      const references = chunks.map((chunk) => makeSource({ source: 'document', documentId, title: document.title, page: chunk.page_number, anchor: chunk.id, evidenceType: 'passage' }));
+      const evidence = await this.mapReduceEvidence(document.title, chunks.map((chunk, index) => ({
+        text: `[[ref:${references[index]!.id}]]\n${chunk.text}`,
         sectionId,
       })), 'section');
-      const markdown = await this.finalizeSummary(document.title, section.title, 'section', evidence);
+      const markdown = await this.finalizeSummary(document.title, section.title, 'section', evidence, references);
       return this.summaries.save({
         scope: 'section',
         targetId: sectionId,
@@ -135,6 +139,7 @@ export class SummaryService {
         sectionId,
         status: 'ready',
         markdown,
+        structure: { references },
         promptVersion: SUMMARY_PROMPT_VERSION,
       });
     } catch (error) {
@@ -153,13 +158,13 @@ export class SummaryService {
   async generateProjectSummary(projectId: string, projectName: string): Promise<SummaryRecord> {
     const bookSummaries = this.database
       .prepare(
-        `SELECT s.markdown, d.title FROM summaries s
+        `SELECT s.markdown, s.structure_json, d.title FROM summaries s
          JOIN documents d ON d.id = s.document_id
          JOIN project_documents pd ON pd.document_id = d.id
          WHERE s.project_id = ? AND s.scope = 'book' AND s.status = 'ready' AND s.markdown IS NOT NULL
          ORDER BY d.title`,
       )
-      .all(projectId) as Array<{ markdown: string; title: string }>;
+      .all(projectId) as Array<{ markdown: string; title: string; structure_json: string | null }>;
     if (bookSummaries.length === 0) throw new Error('Project has no ready book summaries yet');
 
     this.summaries.save({
@@ -172,13 +177,15 @@ export class SummaryService {
       const evidence = bookSummaries
         .map((item) => `# ${item.title}\n${item.markdown}`)
         .join('\n\n');
-      const markdown = await this.finalizeSummary(projectName, null, 'project', evidence.slice(0, 16000));
+      const references = bookSummaries.flatMap((item) => summaryReferences(item.structure_json));
+      const markdown = await this.finalizeSummary(projectName, null, 'project', evidence.slice(0, 16000), references);
       return this.summaries.save({
         scope: 'project',
         targetId: projectId,
         projectId,
         status: 'ready',
         markdown,
+        structure: { references },
         promptVersion: SUMMARY_PROMPT_VERSION,
       });
     } catch (error) {
@@ -201,7 +208,8 @@ export class SummaryService {
     if (totalTokens <= 3500) return chunks.map((chunk) => chunk.text).join('\n\n').slice(0, 16000);
 
     let evidence = await this.summarizeGroups(title, chunks.map((chunk) => chunk.text), scope);
-    while (estimateTokens(evidence) > 5000) {
+    for (let round = 0; estimateTokens(evidence) > 5000; round++) {
+      if (round >= 4) throw new Error('摘要压缩未收敛，请缩小摘要范围');
       const groups = evidence
         .split(/\n\n/u)
         .filter(Boolean)
@@ -250,6 +258,7 @@ export class SummaryService {
     sectionTitle: string | null,
     scope: SummaryScope,
     evidence: string,
+    references: SourceReference[],
   ): Promise<string> {
     const providerFile = this.loadProviderConfig();
     const client = new ModelClient(providerFile);
@@ -268,7 +277,12 @@ export class SummaryService {
       ],
       maxTokens: 1200,
     });
-    return result.content.trim();
+    const markdown = result.content.trim();
+    const validIds = new Set(references.map((source) => source.id));
+    for (const match of markdown.matchAll(/\[\[ref:([^|\]]+)(?:\|[^\]]+)?\]\]/gu)) {
+      if (!validIds.has(match[1]!)) throw new Error('摘要包含未知来源引用');
+    }
+    return markdown;
   }
 
   private loadProviderConfig() {

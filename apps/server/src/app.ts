@@ -68,12 +68,14 @@ export async function createApp(options: AppOptions = {}) {
   database.pragma('journal_mode = WAL');
   database.pragma('foreign_keys = ON');
   const schemaVersion = Number(database.pragma('user_version', { simple: true }));
-  if (schemaVersion > 0 && schemaVersion < 2) {
+  if (schemaVersion > 0 && schemaVersion < 3) {
     const backups = join(dataRoot, 'backups');
     mkdirSync(backups, { recursive: true });
-    await database.backup(join(backups, `before-schema-v2-${Date.now()}.db`));
+    await database.backup(join(backups, `before-schema-v${schemaVersion === 1 ? 2 : 3}-${Date.now()}.db`));
   }
   migrate(database);
+  database.prepare("UPDATE agent_runs SET status='failed',error='运行被中断，可重新发起；已保存笔记保留',finished_at=?,updated_at=? WHERE status IN ('running','pending')")
+    .run(new Date().toISOString(), new Date().toISOString());
 
   const app: FastifyInstance = Fastify({ logger: options.logger ?? false });
   await app.register(cors, { origin: ['http://127.0.0.1:5173', 'http://localhost:5173'] });
@@ -100,7 +102,7 @@ export async function createApp(options: AppOptions = {}) {
   const agentService = new AgentService(dataRoot, database, providerConfig);
   const conversations = new ConversationService(database, dataRoot, providerConfig, agentService);
   registerConversationRoutes(app, conversations);
-  app.addHook('preClose', async () => { await conversations.close(); });
+  app.addHook('preClose', async () => { await conversations.close(); await agentService.close(); });
 
   app.setErrorHandler((rawError, _request, reply) => {
     const error = rawError as Error & { statusCode?: number };

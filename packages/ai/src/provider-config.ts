@@ -31,6 +31,17 @@ export const providerFileSchema = z.object({
       max_results: tomlInteger().pipe(z.number().int().min(1).max(50)).default(8),
     })
     .optional(),
+  mcp: z.object({ search: z.object({
+    enabled: z.boolean().default(true),
+    startup_timeout_ms: tomlInteger().pipe(z.number().int().min(100).max(30000)).default(5000),
+    read_timeout_ms: tomlInteger().pipe(z.number().int().min(100).max(60000)).default(20000),
+  }).strict().optional() }).strict().optional(),
+  harness: z.object({
+    max_model_calls: tomlInteger().pipe(z.number().int().min(2).max(24)).default(12),
+    max_tool_calls: tomlInteger().pipe(z.number().int().min(1).max(32)).default(16),
+    max_tokens: tomlInteger().pipe(z.number().int().min(3000).max(100000)).default(24000),
+    timeout_ms: tomlInteger().pipe(z.number().int().min(1000).max(300000)).default(180000),
+  }).strict().optional(),
 });
 
 export type ProviderFile = z.infer<typeof providerFileSchema>;
@@ -65,7 +76,7 @@ export function loadProviderConfig(dataRoot: string): ProviderFile {
     const parsed = parse(raw) as Record<string, unknown>;
     return providerFileSchema.parse(parsed);
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = error instanceof z.ZodError ? error.issues.map((issue) => `${issue.path.join('.')}: ${issue.code}`).join('; ') : 'Unable to parse configuration';
     throw new ProviderConfigError('invalid', `Provider configuration is invalid: ${detail}`);
   }
 }

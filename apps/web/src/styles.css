@@ -107,3 +107,45 @@ a { color:var(--accent); overflow-wrap:anywhere; } h1,h2,h3,p { overflow-wrap:an
   .library-page { padding:20px 16px; } .library-controls { align-items:stretch; } .library-controls > * { max-width:100%; } .import-control { flex-wrap:wrap; } .import-control input { width:220px; }
   .book-grid { grid-template-columns:minmax(0,1fr); } .library-discovery { flex-wrap:wrap; } .conversation-select,.chat-composer textarea { font-size:16px; }
 }
+.source-reference {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 20px;
+  padding: 0 3px;
+  margin: 0 2px;
+  border: 0;
+  border-radius: 3px;
+  background: #eef3f2;
+  color: #285b53;
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  vertical-align: baseline;
+  text-decoration: none;
+  cursor: pointer;
+}
+.source-reference:focus-visible { outline: 2px solid #398074; outline-offset: 2px; }
+.reference-tooltip {
+  display: none;
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 5px);
+  right: 0;
+  width: max-content;
+  max-width: min(260px, 70vw);
+  padding: 7px 9px;
+  border: 1px solid #d9dfdd;
+  border-radius: 4px;
+  background: #fff;
+  color: #313936;
+  font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  box-shadow: 0 3px 12px #18231c14;
+  pointer-events: none;
+}
+.source-reference:hover .reference-tooltip, .source-reference:focus-visible .reference-tooltip { display: block; }
+.reference-tooltip-visible { display: block; position: fixed; bottom: auto; right: auto; z-index: 100; width: min(260px, calc(100vw - 16px)); max-height: 210px; overflow: auto; }
+.retrieval-status { font-size: 12px; line-height: 1.6; color: #796227; border-left: 2px solid #b49b5a; padding-left: 8px; }

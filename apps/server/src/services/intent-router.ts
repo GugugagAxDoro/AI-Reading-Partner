@@ -1,4 +1,5 @@
 import type { AiActionType } from './prompts';
+import { needsArtifact } from './evidence';
 
 export interface IntentInput {
   action?: AiActionType;
@@ -13,20 +14,6 @@ export interface IntentRoute {
   reason: string;
 }
 
-const agentSignals = [
-  '研究',
-  '调查',
-  '总结全',
-  '联网',
-  '跨书',
-  '跨文档',
-  '对比',
-  '整理成',
-  '生成笔记',
-  '脑图',
-  '思维导图',
-];
-
 export function routeReadingIntent(input: IntentInput): IntentRoute {
   if (input.forceAgent) {
     return { kind: 'agent_task', reason: '用户显式要求深度研究' };
@@ -34,11 +21,8 @@ export function routeReadingIntent(input: IntentInput): IntentRoute {
   const text = [input.instruction, input.selection]
     .filter((value): value is string => typeof value === 'string')
     .join('\n');
-  if (agentSignals.some((signal) => text.toLowerCase().includes(signal))) {
-    return { kind: 'agent_task', reason: '任务包含多步研究或联网信号' };
-  }
-  if (input.instruction && input.instruction.length > 120) {
-    return { kind: 'agent_task', reason: '自定义指令较长，可能需要多步证据' };
+  if (needsArtifact(text)) {
+    return { kind: 'agent_task', reason: '任务需要操作笔记或脑图产物' };
   }
   if (input.action) {
     return { kind: 'direct_action', action: input.action, reason: '命中的是单步阅读动作' };
